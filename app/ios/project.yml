@@ -1,0 +1,33 @@
+name: SavedScrollEngine
+options:
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  SavedScrollEngine:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      # The brain (same JS as Scriptable), run in JavaScriptCore by Sources/Brain.swift
+      - path: Brain/bridge.js
+        buildPhase: resources
+      - path: ../../brain/core.js
+        buildPhase: resources
+      - path: ../../brain/navigator.js
+        buildPhase: resources
+      - path: ../../scriptable/SavedScroll.js
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.savedscroll.engine
+        PRODUCT_NAME: Saved Scroll
+        INFOPLIST_FILE: Sources/Info.plist
+        SWIFT_VERSION: "5.0"
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridging.h
+        LIBRARY_SEARCH_PATHS: $(PROJECT_DIR)/lib
+        OTHER_LDFLAGS: -lssengine -lresolv -lc++ -framework Security -framework SystemConfiguration
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+        ENABLE_BITCODE: "NO"
+        GENERATE_INFOPLIST_FILE: "NO"

@@ -1,0 +1,53 @@
+[package]
+name = "ssengine"
+version = "0.1.0"
+edition = "2021"
+description = "Saved Scroll on-phone engine: injects touches into TikTok on the same iPhone (iOS 27 CoreDevice HID over the loopback VPN) and serves the SS Remote HTTP API on 127.0.0.1."
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[features]
+default = []
+# The real iPhone (idevice: remote pairing over loopback, userspace tunnel, display stream, HID).
+phone = ["dep:idevice", "dep:uuid"]
+# Self-refresh: re-sign this app with the user's free Apple ID and reinstall it over the phone's own
+# tunnel, so the 7-day free signing never runs out (isideload, MIT).
+refresh = ["phone", "dep:isideload", "dep:plist", "dep:rustls", "dep:rootcause", "tokio/rt-multi-thread"]
+# The laptop installer (sscore): same signing as the phone, over USB.
+laptop = ["refresh", "idevice/usbmuxd", "idevice/house_arrest", "tokio/rt-multi-thread", "tokio/macros", "dep:rpassword", "dep:keyring"]
+
+[dependencies]
+tokio = { version = "1.41", features = ["rt", "net", "io-util", "time", "macros", "sync"] }
+serde_json = "1"
+rand = "0.8"
+uuid = { version = "1", features = ["v4"], optional = true }
+idevice = { git = "https://github.com/jkcoxson/idevice", rev = "26a28f6a46b5d85a28043c2e62febfa394c8b0a6", optional = true, default-features = false, features = [
+  "ring", "remote_pairing", "rsd", "xpc", "core_device", "display_stream", "tunnel_tcp_stack", "tcp",
+  "mobile_image_mounter", "tss",
+] }
+isideload = { git = "https://github.com/nab138/isideload", rev = "326e56229d0727cb6e7b34c8cf03e37e2cd3e17d", optional = true, default-features = false, features = [
+  "install", "tokio-mt", "fs-storage",
+] }
+plist = { version = "1", optional = true }
+rpassword = { version = "7", optional = true }
+keyring = { version = "3", optional = true, features = ["windows-native"] }
+rootcause = { version = "0.12", optional = true }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
+
+[[bin]]
+name = "sscore"
+required-features = ["laptop"]
+
+[[bin]]
+name = "ssprobe"
+required-features = ["phone"]
+
+[dev-dependencies]
+tokio = { version = "1.41", features = ["rt", "net", "io-util", "time", "macros", "sync"] }
+
+# isideload asks for idevice from crates.io (0.1.68); use our pinned git copy so there's only one.
+[patch.crates-io]
+idevice = { git = "https://github.com/jkcoxson/idevice", rev = "26a28f6a46b5d85a28043c2e62febfa394c8b0a6" }

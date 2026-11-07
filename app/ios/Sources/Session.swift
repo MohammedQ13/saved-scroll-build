@@ -119,12 +119,14 @@ final class Session: ObservableObject {
     @MainActor
     func autoCheckIfDue() async {
         Engine.shared.refresh()
-        let viaMacro = (Engine.shared.status["checking"] as? Bool) == true    // the macro's last tap brought us here
+        // The macro's last tap brought us here (it may have finished a moment ago: test #90, OP-57).
+        let endMs = (Engine.shared.status["checkEndMs"] as? NSNumber)?.doubleValue ?? 0
+        let viaMacro = (Engine.shared.status["checking"] as? Bool) == true || Date().timeIntervalSince1970 * 1000 - endMs < 6000
         let now = UIPasteboard.general.changeCount
-        guard let last = checkedPaste else { checkedPaste = now; if viaMacro { openTikTok() }; return }
-        guard Engine.shared.autoCheckOn, now != last else { if viaMacro { openTikTok() }; return }
+        guard let last = checkedPaste else { checkedPaste = now; ssLog.notice("auto-check: first activation viaMacro=\(viaMacro)"); if viaMacro { openTikTok() }; return }
+        guard Engine.shared.autoCheckOn, now != last else { if viaMacro { ssLog.notice("auto-check: nothing new copied, back to TikTok"); openTikTok() }; return }
         let info = await Brain.shared.run(["cmd": "menu-info"])
-        guard (info["pending"] as? Bool) == true else { if viaMacro { openTikTok() }; return }
+        guard (info["pending"] as? Bool) == true else { if viaMacro { ssLog.notice("auto-check: no jump pending, back to TikTok"); openTikTok() }; return }
         for _ in 0..<20 {                                            // ≤4 s for the engine to finish the macro
             Engine.shared.refresh()
             if !Engine.shared.busy && (Engine.shared.status["checking"] as? Bool) != true { break }

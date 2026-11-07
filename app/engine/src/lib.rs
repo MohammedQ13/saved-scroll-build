@@ -84,6 +84,8 @@ pub struct Status {
     pub pre: u32,
     pub connected: bool,
     pub last_error: String,
+    /// When the last check macro finished (ms since 1970), so the app can tell it was brought forward by it.
+    pub check_end_ms: u64,
 }
 
 pub struct Engine<D: Device> {
@@ -140,7 +142,7 @@ impl<D: Device + 'static> Engine<D> {
         serde_json::json!({
             "ok": true, "version": VERSION, "kind": "phone", "ble": s.connected,
             "busy": s.busy && !s.checking, "checking": s.checking, "done": s.done, "planned": s.planned,
-            "preDone": s.pre_done, "pre": s.pre, "autoCheck": *self.auto_check.borrow(),
+            "preDone": s.pre_done, "pre": s.pre, "autoCheck": *self.auto_check.borrow(), "checkEndMs": s.check_end_ms,
             "hasCheckMacro": !self.check_macro.borrow().is_empty(), "error": s.last_error,
         })
     }
@@ -207,6 +209,7 @@ impl<D: Device + 'static> Engine<D> {
             Self::sleep_or_stop(&stop, 800).await;
             let m = self.check_macro.borrow().clone();
             self.run_macro(&m).await;
+            self.set(|s| s.check_end_ms = now_ms());
         }
         self.dev.borrow_mut().end().await;
         self.set(|s| { s.busy = false; s.checking = false; });

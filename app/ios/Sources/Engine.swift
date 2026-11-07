@@ -33,7 +33,8 @@ final class Engine: ObservableObject {
     /// OP-56). Breaks if the floating window was dragged away from the top centre.
     static let checkMacro: String = {
         func p(_ x: Double, _ y: Double) -> String { "\(Int(x * 65535 / 1206)) \(Int(y * 65535 / 2622))" }
-        return ["T \(p(200, 950))", "W 1800",              // top-row video
+        return ["W 1500",                                  // let the grid stop gliding (back-up legs: OP-57)
+                "T \(p(200, 950))", "W 1800",              // top-row video
                 "T \(p(1113, 2057))", "W 1200",            // Share
                 "T \(p(327, 2168))", "W 900",              // Copy link
                 "D \(p(2, 1311)) \(p(844, 1311)) 300", "W 1200",   // back to the grid (left-edge swipe)

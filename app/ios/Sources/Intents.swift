@@ -81,8 +81,21 @@ struct HideWindowIntent: AppIntent {
 
     func perform() async throws -> some IntentResult {
         // "TikTok closed" because Show brought our app forward for a moment (or the user opened our app): keep it.
-        let (ours, front) = await MainActor.run { (Date() < Overlay.shared.showingUntil, UIApplication.shared.applicationState == .active) }
+        let (ours, front, checking) = await MainActor.run {
+            Engine.shared.refresh()
+            return (Date() < Overlay.shared.showingUntil, UIApplication.shared.applicationState != .background,
+                    (Engine.shared.status["checking"] as? Bool) == true)
+        }
         if ours || front { ssLog.notice("HideWindowIntent: skipped (showing=\(ours) appInFront=\(front))"); return .result() }
+        // TikTok can report closed before the status-bar return has made our
+        // scene active. Only defer during checks, when there are no scroll swipes.
+        if checking {
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            if await MainActor.run(body: { UIApplication.shared.applicationState != .background }) {
+                ssLog.notice("HideWindowIntent: skipped during check return")
+                return .result()
+            }
+        }
         // Leaving TikTok mid-dive: stop first, or the swipes would land on whatever is in front now.
         let busy = await MainActor.run { Engine.shared.busy }
         if busy { await Session.shared.stop() }

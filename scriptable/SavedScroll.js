@@ -215,7 +215,9 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     }
     if (!targetSave) return out({ ok: false, text: "Couldn't find that spot in your saves." });
     const targetTop = lib.top(targetSave.bottom, now);
-    const from = state.knownEst && now - state.knownEst.at < 30 * 60000 ? state.knownEst.top : 1;
+    // A remembered position goes stale fast: people scroll and reopen Saved at the top (device 2026-11-06: a
+    // 25-min-old reading made a fresh jump say "above you"). Trust it for 5 minutes.
+    const from = state.knownEst && now - state.knownEst.at < 5 * 60000 ? state.knownEst.top : 1;
     return out(await deliver(planLeg(from, targetTop, label, cmd.net || "wifi-good", false, cmd.clip || "")));
   }
 
@@ -224,7 +226,9 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     if (Math.abs(remaining) < 30) { state.pending = null; return { ok: true, done: true, text: `You're there: ${label}.` }; }
     if (remaining < 0) {
       state.pending = null;
-      return { ok: true, up: true, text: `${label} is above you (~${n(-remaining)} saves up). Scroll up: it's already loaded, so it's quick. Or tap the top bar and plan again.` };
+      // Still offer the normal starts (e.g. Saved was reopened at the top since that reading).
+      state.armed = { targetTop, label, net, at: now, clip: clipAtArm || "" };
+      return { ok: true, up: true, armed: true, text: `${label} is above you (~${n(-remaining)} saves up). Scroll up: it's already loaded, so it's quick. If Saved is back at the top, start from there.` };
     }
     // Position unknown: the brain needs one reading first. TikTok has no scroll-to-top (tapping the clock does
     // nothing, user-tested), so you copy the link of any video you can see. This must happen before the dive:

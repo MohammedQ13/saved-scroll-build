@@ -11,17 +11,19 @@ func ssScreenAnchor(_ bytes: UnsafePointer<UInt8>, _ count: Int, _ kind: Int32) 
         CGRect(x: 0, y: 0.11, width: 1, height: 0.36),      // Share sheet
     ]
     guard regions.indices.contains(Int(kind)) else { return 0 }
+    let region = regions[Int(kind)]
     let data = Data(bytes: bytes, count: count)
     for level in [VNRequestTextRecognitionLevel.fast, .accurate] {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = level
-        request.regionOfInterest = regions[Int(kind)]
+        request.regionOfInterest = region
         let handler = VNImageRequestHandler(data: data, options: [:])
         do { try handler.perform([request]) } catch { return 0 }
         let labels = (request.results ?? []).compactMap { result -> ScreenLabel? in
             guard let value = result.topCandidates(1).first?.string else { return nil }
             let box = result.boundingBox
-            return ScreenLabel(text: value.lowercased().trimmingCharacters(in: .whitespaces), x: box.midX, y: 1 - box.midY)
+            return ScreenLabel(text: value.lowercased().trimmingCharacters(in: .whitespaces),
+                               x: region.minX + box.midX * region.width, y: 1 - region.minY - box.midY * region.height)
         }
         let anchor = kind == 0 ? gridAnchor(labels) : kind == 1 ? shareAnchor(labels) : copyAnchor(labels)
         if let anchor, (0..<1).contains(anchor) { return Int32(anchor * 65535) }

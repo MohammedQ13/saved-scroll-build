@@ -201,11 +201,15 @@ final class Overlay: NSObject, ObservableObject, AVPictureInPictureSampleBufferP
         if checking { return Look(dot: pink, big: "CHECK", small: "READING POSITION", progress: nil) }
         if busy {
             wasBusy = true
+            if planned == 0 { return Look(dot: pink, big: "CHECKING", small: "FINDING POSITION", progress: nil) }
             if pre > 0 && preDone < pre { return Look(dot: pink, big: "\(preDone)/\(pre)", small: "↑ TO THE TOP", progress: Double(preDone) / Double(max(pre, 1))) }
             return Look(dot: pink, big: "\(done)/\(planned)", small: "↓ SCROLLING", progress: Double(done) / Double(max(planned, 1)))
         }
+        if (st["checking"] as? Bool) == true {
+            return Look(dot: pink, big: "CHECKING", small: "VERIFYING LANDING", progress: nil)
+        }
         if wasBusy { wasBusy = false; lastDive = (done, planned, Date()) }
-        if let d = lastDive, Date().timeIntervalSince(d.at) < 20, d.planned > 0 {
+        if let d = lastDive, Date().timeIntervalSince(d.at) < 20, d.planned > 0, (st["error"] as? String ?? "").isEmpty {
             let finished = d.done >= d.planned
             let green = UIColor(red: 0.27, green: 0.93, blue: 0.56, alpha: 1)
             return Look(dot: finished ? green : .systemOrange, big: "\(d.done)/\(d.planned)", small: finished ? "DONE" : "STOPPED",
@@ -303,7 +307,7 @@ final class Overlay: NSObject, ObservableObject, AVPictureInPictureSampleBufferP
     func pictureInPictureController(_ c: AVPictureInPictureController, setPlaying playing: Bool) {
         Task { @MainActor in
             if !playing { await Session.shared.stop() }
-            else if Session.shared.armed != nil { await Session.shared.startHere(.viaTop) }
+            else if Session.shared.armed != nil { await Session.shared.startHere(Session.shared.autoLocate ? .automatic : .viaTop) }
             self.tick()
         }
     }

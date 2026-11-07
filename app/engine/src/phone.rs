@@ -235,5 +235,23 @@ impl Device for PhoneDevice {
         hid.tap(x, y).await.map_err(|x| format!("tap: {x:?}"))
     }
 
+    #[cfg(target_os = "ios")]
+    async fn on_saved_grid(&mut self) -> bool {
+        use idevice::dvt::{remote_server::RemoteServerClient, screenshot::ScreenshotClient};
+        extern "C" { fn ss_is_saved_grid(data: *const u8, length: usize) -> i32; }
+        let snapshot = async {
+            let adapter = self.adapter.as_mut().ok_or(idevice::IdeviceError::NotFound)?;
+            let hs = self.handshake.as_mut().ok_or(idevice::IdeviceError::NotFound)?;
+            let mut server = RemoteServerClient::connect_rsd(adapter, hs).await?;
+            server.read_message(0).await?;
+            let mut client = ScreenshotClient::new(&mut server).await?;
+            client.take_screenshot().await
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(3), snapshot).await {
+            Ok(Ok(data)) => unsafe { ss_is_saved_grid(data.as_ptr(), data.len()) == 1 },
+            _ => false,
+        }
+    }
+
     fn connected(&self) -> bool { self.adapter.is_some() }
 }

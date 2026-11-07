@@ -13,7 +13,10 @@ struct SavedScrollApp: App {
                     ss_engine_app_active()
                     Task { await Session.shared.refresh(); await Session.shared.autoCheckIfDue() }
                 }
-                if p == .background { Session.shared.didEnterBackground() }      // TikTok in front: start a queued dive
+                if p == .background {
+                    ss_engine_app_background()
+                    Session.shared.didEnterBackground()
+                }
             }
     }
 }
@@ -171,6 +174,11 @@ struct HomeView: View {
                     RowButton(icon: "mappin", title: i == 0 ? "Last checkpoint" : "Checkpoint", detail: p["label"] as? String ?? "") {
                         Task { await session.plan(i == 0 ? "pin" : "pin:\(i)") }
                     }
+                    .contextMenu {
+                        Button("Remove checkpoint", systemImage: "trash", role: .destructive) {
+                            Task { await session.unpin(i) }
+                        }
+                    }
                 }
                 if session.hasPending {
                     RowButton(icon: "scope", title: "Check where I landed", detail: "after copying a link near the top", tint: Theme.accent) { Task { await session.checkLanded() } }
@@ -181,10 +189,14 @@ struct HomeView: View {
     }
 
     private func armedCard(_ label: String) -> some View {
-        Card(title: "Where are you in Saved?") {
+        Card(title: "Ready to go") {
             Text(label).font(Theme.mono(15, .bold)).foregroundStyle(Theme.text)
-            Text("TikTok must be on your Saved tab: Go switches to TikTok and starts there.").font(Theme.mono(10)).foregroundStyle(Theme.warn)
-            PrimaryButton(title: "Go up first, then dive", icon: "arrow.up.and.down") { session.go(.viaTop) }
+            Text("Leave TikTok on your Saved grid. Go finds your current position.").font(Theme.mono(10)).foregroundStyle(Theme.warn)
+            if session.autoLocate {
+                PrimaryButton(title: "Go", icon: "location.fill") { session.go(.automatic) }
+            } else {
+                PrimaryButton(title: "Go up first, then dive", icon: "arrow.up.and.down") { session.go(.viaTop) }
+            }
             RowButton(icon: "arrow.up.to.line", title: "Saved is at the very top", detail: "it just opened") { session.go(.top) }
             RowButton(icon: "doc.on.clipboard", title: "From the video I copied", detail: "fastest when you're far down") { session.go(.copied) }
         }

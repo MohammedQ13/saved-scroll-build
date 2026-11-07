@@ -29,6 +29,7 @@ async function main(input, env) {
   const indexText = io.read("index.txt");
   let lib = indexText ? new core.Library(core.loadIndex(indexText), state.lib) : null;
   const brain = state.brain || nav.newState();
+  const v2 = env.navigatorV2;
   const out = r => { state.lib = lib ? lib.store : state.lib; state.brain = brain; io.saveState(state); return r; };
   const fmtDate = ts => new Date(ts).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
   const n = x => Number(x).toLocaleString("en-US");
@@ -78,6 +79,10 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     if (!remote) return out({ ok: false, text: "No SS Remote." });
     const res = await remote.stop(), st = await remote.status();
     if (state.pending && state.pending.remote && st) state.pending.remote.stoppedAt = st.done;
+    if (state.jumpV2) {
+      recordV2("stop", state.jumpV2, { swipes: st?.done });
+      state.jumpV2 = null;
+    }
     return out({ ok: !!res, text: res ? `Stopped${st ? ` after ${st.done} of ${st.planned} swipes` : ""}. Copy link on a top video › button › Check where I landed, to see where you are.` : "Couldn't reach the Remote. Triple-click isn't needed: it stops by itself when its swipes are done." });
   }
 
@@ -98,7 +103,7 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     const armed = state.armed && now - state.armed.at < 15 * 60000 ? state.armed.label : null;
     const rs = await remoteStatus();
     if (rs && rs.ok && state.remote) state.remote.autoCheck = !!(rs.autoCheck && rs.hasCheckMacro);
-    return out({ ok: true, indexed: !!lib, pending: !!state.pending, armed,
+    return out({ ok: true, indexed: !!lib, pending: !!(state.pending || state.jumpV2), autoCheck: !!(rs?.autoCheck && rs?.hasCheckMacro), armed,
       remote: state.remote && state.remote.paired ? { reachable: !!(rs && rs.ok), ble: !!(rs && rs.ble), app: !!state.remote.app,
         ready: !!(rs && rs.ok && (rs.ble || rs.kind === "phone")), busy: !!(rs && rs.busy), done: rs ? rs.done : 0, planned: rs ? rs.planned : 0 } : null,
       pins: lib ? lib.store.pins.slice(0, 8).map((p, i) => ({ i, label: `${p.note ? "“" + p.note + "” · " : ""}${p.saved ? "saved " + fmtDate(p.saved) : "recent save"} · pinned ${fmtDate(p.at)}` })) : [],
@@ -131,6 +136,7 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     if (lib) ({ lib, resaves } = lib.reindex(ix)); else lib = new core.Library(ix, state.lib);
     io.write("index.txt", core.serializeIndex(ix));
     state.importedAt = now;
+    state.armed = state.pending = state.jumpV2 = null;
     return out({ ok: true, total: ix.meta.total, text: `Imported ${n(ix.meta.total)} saves (${fmtDate(ix.meta.oldest)} – ${fmtDate(ix.meta.newest)}). ${resaves.length ? resaves.length + " re-saved videos detected. " : ""}${ix.meta.dupes ? ix.meta.dupes + " duplicates merged. " : ""}` });
   }
   if (!lib) return out({ ok: false, text: "Import your TikTok export first (tap the button › Import my TikTok export)." });
@@ -148,6 +154,64 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     return `Save #${n(w.top)} of ~${n(w.total)} · saved ${fmtDate(w.saved)} · posted ${fmtDate(w.posted)}${ph}${re}`;
   };
 
+  function recordV2(event, jump, detail) {
+    if (env.logRun) env.logRun({ version: 2, event, at: now, run: jump.run, target: jump.target, leg: jump.legs, ...detail });
+  }
+
+  function failV2(jump, text, error) {
+    recordV2("failed", jump, { error, text });
+    state.jumpV2 = null;
+    return out({ ok: false, text });
+  }
+
+  if (v2 && cmd.cmd === "advance") {
+    const jump = state.jumpV2;
+    if (!jump || !jump.action || jump.inFlight) return out({ ok: false, text: "No jump is ready to continue." });
+    const st = await remoteReady();
+    if (!st || st.busy || st.checking || !st.autoCheck || !st.hasCheckMacro) {
+      return failV2(jump, st?.busy || st?.checking ? "Saved Scroll is already moving." :
+        "Turn on hands-free checks and make sure LocalDevVPN is connected.");
+    }
+    const action = jump.action;
+    const res = await remote.dive({ ...action, pn: 0, idle: 1, guard: 1 });
+    if (!res?.ok || !Number.isFinite(res.runId)) return failV2(jump, appProblem(st, res).text);
+    jump.inFlight = { id: res.runId, at: now, ...action };
+    jump.action = null;
+    recordV2("leg", jump, { engineRun: res.runId, from: jump.rank, action, context: jump.context });
+    return out({ ok: true, remote: true, text: action.n ? `${jump.label}\nScrolling · about ${Math.round(action.n * action.iv / 1000)} s to the next check.` :
+      "Checking your position in Saved…" });
+  }
+
+  if (v2 && cmd.cmd === "check-failed" && state.jumpV2) {
+    return failV2(state.jumpV2, "Couldn't verify the Saved grid or read a fresh link. Open Saved and try again.");
+  }
+
+  if (v2 && cmd.cmd === "arrived" && state.jumpV2) {
+    const jump = state.jumpV2, flight = jump.inFlight, st = await remoteStatus();
+    if (!flight || st?.busy || st?.checking) return out({ ok: false, text: "Wait for Saved Scroll to finish checking." });
+    if (!st || st.runId !== flight.id || st.done !== flight.n || st.error || st.checkFailed) {
+      return failV2(jump, "The scroll was interrupted. Return to Saved and start again.");
+    }
+    const w = await where(cmd.link);
+    const rank = w?.inIndex ? lib.meta.total - w.bottom + 1 : null;
+    const learned = state.learnedV2 || (state.learnedV2 = env.v2Prior?.() || {});
+    const result = v2.observe(jump, learned, rank, flight.row, { done: st.done });
+    recordV2("check", jump, { engineRun: flight.id, observed: rank, from: jump.rank, row: flight.row,
+      swipes: st.done, elapsedMs: now - flight.at, error: result.error, sample: result.sample,
+      verified: !!(result.located || result.done) });
+    jump.inFlight = null;
+    if (result.failed) return failV2(jump, result.failed, result.error);
+    if (result.done) {
+      state.jumpV2 = null;
+      recordV2("done", jump, { error: result.error });
+      return out({ ok: true, done: true, error: result.error, text: `You're there: ${jump.label}.` });
+    }
+    jump.context = cmd.context || jump.context;
+    jump.action = result.action || v2.plan(jump, learned, jump.context, { explore: !!cmd.calibrate });
+    return out({ ok: true, resume: true, text: result.action ? "Checking another row…" :
+      `${jump.label} · ${n(Math.abs(result.error))} saves to go.` });
+  }
+
   if (cmd.cmd === "where") {
     const w = await where(cmd.link);
     if (!w) return out({ ok: false, text: "Couldn't read a TikTok video link. In TikTok tap Share › Copy link, then try again." });
@@ -160,6 +224,11 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     if (!w) return out({ ok: false, text: "Copy a video link first (Share › Copy link)." });
     lib.pin(w.id, cmd.note || "", now);
     return out({ ok: true, text: `Pinned${cmd.note ? " “" + cmd.note + "”" : ""}: ${describe(w)}` });
+  }
+  if (cmd.cmd === "unpin") {
+    if (!Number.isInteger(cmd.i) || cmd.i < 0 || !lib.store.pins[cmd.i]) return out({ ok: false, text: "Checkpoint missing." });
+    lib.store.pins.splice(cmd.i, 1);
+    return out({ ok: true, text: "Checkpoint removed." });
   }
 
   if (cmd.cmd === "event") {
@@ -187,17 +256,19 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
 
   if (cmd.cmd === "plan") {
     const t = String(cmd.target || "");
-    let targetSave = null, label = "";
+    let targetSave = null, label = "", count = 0;
     if (/^\d{4}-\d{2}(-\d{2})?$/.test(t)) {
       const [y, m, d] = t.split("-").map(Number);
       if (d) {
         const day = lib.day(y, m, d);
         targetSave = day.count ? day.newest : (day.newer || day.older);
+        count = day.count;
         label = day.count ? `${fmtDate(day.start)} (${n(day.count)} saves)` : `nearest saves to ${fmtDate(day.start)}`;
         const re = lib.resavedFrom(day.start, day.start + DAY).length;
         if (re) label += ` · ${re} re-saved since, now near the top`;
       } else {
         const start = Date.UTC(y, m - 1, 1), end = Date.UTC(y, m, 1), r = lib.range(start, end);
+        count = r.count;
         targetSave = r.count ? r.newest : lib.day(y, m, 1).older; label = `${new Date(start).toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" })} (${n(r.count)} saves)`;
       }
     } else if (/tiktok\.com|^\d{18,21}$/.test(t)) {          // a copied video link (e.g. from Watch history)
@@ -215,6 +286,11 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     }
     if (!targetSave) return out({ ok: false, text: "Couldn't find that spot in your saves." });
     const targetTop = lib.top(targetSave.bottom, now);
+    if (state.remote && state.remote.app) {
+      const rank = lib.meta.total - targetSave.bottom + 1;
+      state.armed = { targetTop, rank: count && v2 ? v2.dateAim(rank, count) : rank, label, net: cmd.net || "wifi-good", at: now };
+      return out({ ok: true, armed: true, text: label });
+    }
     // A remembered position goes stale fast: people scroll and reopen Saved at the top (device 2026-11-06: a
     // 25-min-old reading made a fresh jump say "above you"). Trust it for 5 minutes.
     const from = state.knownEst && now - state.knownEst.at < 5 * 60000 ? state.knownEst.top : 1;
@@ -268,6 +344,17 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
   if (cmd.cmd === "start") {                         // second half of a jump: a fresh copied link says where you are
     const a = state.armed;
     if (!a || now - a.at > 15 * 60000) return out({ ok: false, text: "Nothing to start. Choose where to go first." });
+    if (v2 && cmd.auto && a.rank) {
+      const st = await remoteReady();
+      if (!st || st.busy || st.checking) return out(appProblem(st));
+      if (!st.autoCheck || !st.hasCheckMacro) return out({ ok: false, text: "Turn on hands-free checks or choose a manual start." });
+      const jump = v2.create(a.rank, lib.meta.total);
+      Object.assign(jump, { label: a.label, run: now, context: cmd.context || {}, action: v2.check() });
+      state.jumpV2 = jump;
+      state.armed = state.pending = null;
+      return out({ ok: true, resume: true, text: "Checking your position in Saved…" });
+    }
+    state.jumpV2 = null;
     let from = 1, pre = 0;
     if (!cmd.top && !cmd.viaTop && cmd.clip && (cmd.fromClip || cmd.clip !== a.clip)) {
       const w = await where(cmd.clip);
@@ -349,7 +436,7 @@ That reading doesn't fit the plan (maybe a video you re-saved recently). Copy th
   if (cmd.cmd === "status") {
     const post = nav.posterior(brain);
     const speeds = nav.RECIPES.map((r, i) => `${r.id}: ${Math.exp(nav.features(i, "wifi-good", 15000).reduce((a, v, k) => a + v * post.mu[k], 0)).toFixed(1)} saves/s`);
-    return out({ ok: true, total: lib.meta.total, totalNow: lib.totalNow(now), pins: lib.store.pins.length, phases: lib.store.phases.length, learned: brain.history.length,
+    return out({ ok: true, total: lib.meta.total, totalNow: lib.totalNow(now), pins: lib.store.pins.length, phases: lib.store.phases.length, learned: brain.history.length + (state.learnedV2?.samples || 0),
       oldest: lib.meta.oldest, newest: lib.meta.newest, text: `${n(lib.meta.total)} saves indexed · ~${n(lib.totalNow(now))} now · ${lib.store.pins.length} pins · ${lib.store.phases.length} phases · ${brain.history.length} jumps learned\n${speeds.join("\n")}` });
   }
   return out({ ok: false, text: `Unknown command ${cmd.cmd}` });

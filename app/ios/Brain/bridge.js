@@ -39,7 +39,8 @@ var SSBridge = (function () {
     async function resolveLink(url) {
       try { var r = await native.http("HEAD", url, "{}", 6); return (r && r.url) || url; } catch (e) { return url; }
     }
-    return { core: __mods.core, nav: __mods.navigator, store: store, remote: remote, resolveLink: resolveLink, now: native.now() };
+    return { core: __mods.core, nav: __mods.navigator, navigatorV2: __mods["navigator-v2"], store: store, remote: remote,
+      resolveLink: resolveLink, now: native.now(), logRun: native.logRun && function (r) { native.logRun(JSON.stringify(r)); } };
   }
 
   async function run(cmdJson) {
@@ -56,5 +57,12 @@ var SSBridge = (function () {
     return JSON.stringify(res);
   }
 
-  return { run: run };
+  // Swift can enter again while a promise waits on a network request. Serialize
+  // read/modify/write transactions so a menu refresh cannot overwrite a jump.
+  var tail = Promise.resolve();
+  return { run: function (cmd) {
+    var next = tail.then(function () { return run(cmd); });
+    tail = next.catch(function () {});
+    return next;
+  } };
 })();

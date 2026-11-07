@@ -1,4 +1,18 @@
 import Foundation
+import Vision
+
+/// Called on the Rust engine thread with an in-memory developer-service frame.
+/// The search label is visible on the observed Saved grid even after scrolling.
+@_cdecl("ss_is_saved_grid")
+func ssIsSavedGrid(_ bytes: UnsafePointer<UInt8>, _ count: Int) -> Int32 {
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = .fast
+    request.regionOfInterest = CGRect(x: 0, y: 0.66, width: 1, height: 0.24)
+    let handler = VNImageRequestHandler(data: Data(bytes: bytes, count: count), options: [:])
+    do { try handler.perform([request]) } catch { return 0 }
+    let text = request.results?.compactMap { $0.topCandidates(1).first?.string.lowercased() }.joined(separator: " ") ?? ""
+    return text.contains("search saved posts") ? 1 : 0
+}
 
 /// Swift face of the Rust engine. The engine serves the SS Remote API on 127.0.0.1:8787 for the
 /// Saved Scroll brain (Scriptable), and does the touching.
@@ -36,13 +50,13 @@ final class Engine: ObservableObject {
     /// `row` 1 = the next row down (a grid row is ~530 px): the brain's "check one row lower" after an odd reading.
     static func checkMacroFor(row: Int) -> String {
         func p(_ x: Double, _ y: Double) -> String { "\(Int(x * 65535 / 1206)) \(Int(y * 65535 / 2622))" }
-        return ["W 1500",                                  // let the grid stop gliding (back-up legs: OP-57)
+        return ["W 1500", "G",                             // settle and verify before opening a tile
                 "T \(p(200, 950 + Double(row) * 530))", "W 1800",   // top-row video (or the row below)
                 "T \(p(1113, 2057))", "W 1200",            // Share
                 "T \(p(327, 2168))", "W 900",              // Copy link
-                "D \(p(2, 1311)) \(p(844, 1311)) 300", "W 1200",   // back to the grid (left-edge swipe)
-                "T \(p(600, 380))", "W 800",               // floating window: show its controls
-                "T \(p(1105, 250))"].joined(separator: ";") // "back to app"
+                "D \(p(2, 2250)) \(p(850, 2250)) 300", "W 1200",   // back to the grid: left-edge swipe low, over the
+                                                                   // caption (at mid-height it flips photo posts)
+                "G", "R \(p(145, 113)) \(p(600, 380)) \(p(1105, 250))"].joined(separator: ";")
     }
 
     /// On by default; Settings can turn it off (then checks are manual: Copy link › Check where I landed).
@@ -53,10 +67,12 @@ final class Engine: ObservableObject {
 
     /// Hands the check macro to the engine (it runs it after each dive while auto-check is on).
     func installAutoCheck() async {
-        for _ in 0..<5 {
-            let r = await api("/macro", ["s": Engine.checkMacro, "save": "check"])
-            if (r["ok"] as? Bool) == true { break }
-            try? await Task.sleep(nanoseconds: 500_000_000)       // the engine's server may still be starting
+        for row in 0...2 {
+            for _ in 0..<5 {
+                let r = await api("/macro", ["s": Engine.checkMacroFor(row: row), "save": row == 0 ? "check" : "check\(row)"])
+                if (r["ok"] as? Bool) == true { break }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
         }
         let r = await api("/autocheck", ["on": autoCheckOn ? "1" : "0"])
         ssLog.notice("auto-check installed: on=\(autoCheckOn) engine=\(r["autoCheck"] ?? "?") macro=\(r["hasCheckMacro"] ?? "?")")

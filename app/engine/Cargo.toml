@@ -26,7 +26,7 @@ rand = "0.8"
 uuid = { version = "1", features = ["v4"], optional = true }
 idevice = { git = "https://github.com/jkcoxson/idevice", rev = "26a28f6a46b5d85a28043c2e62febfa394c8b0a6", optional = true, default-features = false, features = [
   "ring", "remote_pairing", "rsd", "xpc", "core_device", "display_stream", "tunnel_tcp_stack", "tcp",
-  "mobile_image_mounter", "tss",
+  "mobile_image_mounter", "tss", "dvt",
 ] }
 isideload = { git = "https://github.com/nab138/isideload", rev = "326e56229d0727cb6e7b34c8cf03e37e2cd3e17d", optional = true, default-features = false, features = [
   "install", "tokio-mt", "fs-storage",

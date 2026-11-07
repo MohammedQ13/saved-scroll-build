@@ -73,7 +73,8 @@ pub extern "C" fn ss_engine_status() -> *mut c_char {
         Some(s) => {
             let st = s.status.lock().unwrap().clone();
             out(serde_json::json!({"ok": true, "busy": st.busy, "checking": st.checking, "done": st.done, "planned": st.planned,
-                                   "preDone": st.pre_done, "pre": st.pre, "connected": st.connected, "error": st.last_error}))
+                                   "preDone": st.pre_done, "pre": st.pre, "connected": st.connected, "error": st.last_error,
+                                   "checkEndMs": st.check_end_ms, "checkFailed": st.check_failed}))
         }
         None => out(serde_json::json!({"ok": false, "error": "not started"})),
     }
@@ -82,7 +83,13 @@ pub extern "C" fn ss_engine_status() -> *mut c_char {
 /// The app came to the front: reopen the 3-minute pairing window.
 #[no_mangle]
 pub extern "C" fn ss_engine_app_active() {
+    crate::APP_IN_FRONT.store(true, std::sync::atomic::Ordering::Relaxed);
     crate::APP_ACTIVE_MS.store(crate::now_ms(), std::sync::atomic::Ordering::Relaxed);
+}
+
+#[no_mangle]
+pub extern "C" fn ss_engine_app_background() {
+    crate::APP_IN_FRONT.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Stop button in the overlay.

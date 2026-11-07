@@ -22,7 +22,24 @@ final class Brain {
         return FileManager.default.fileExists(atPath: e.path) ? e : d
     }
 
-    private static let modules = ["core", "navigator", "SavedScroll"]
+    private static let modules = ["core", "navigator", "navigator-v2", "SavedScroll"]
+
+    private func appendRun(_ line: String) {
+        let url = exportsDir.deletingLastPathComponent().appendingPathComponent("ss-runs.jsonl")
+        guard let data = (line + "\n").data(using: .utf8) else { return }
+        do {
+            if !FileManager.default.fileExists(atPath: url.path) {
+                try data.write(to: url, options: .atomic)
+            } else {
+                let file = try FileHandle(forWritingTo: url)
+                defer { try? file.close() }
+                try file.seekToEnd()
+                try file.write(contentsOf: data)
+            }
+        } catch {
+            ssLog.notice("Could not write run log: \(error.localizedDescription)")
+        }
+    }
 
     /// Builds the JS context once (on `queue`).
     private func context() -> JSContext? {
@@ -72,12 +89,14 @@ final class Brain {
         }
         let token: @convention(block) () -> String = { Engine.shared.token }
         let now: @convention(block) () -> Double = { Date().timeIntervalSince1970 * 1000 }
+        let logRun: @convention(block) (String) -> Void = { [unowned self] in self.appendRun($0) }
         native.setObject(unsafeBitCast(read, to: AnyObject.self), forKeyedSubscript: "read" as NSString)
         native.setObject(unsafeBitCast(write, to: AnyObject.self), forKeyedSubscript: "write" as NSString)
         native.setObject(unsafeBitCast(newestExport, to: AnyObject.self), forKeyedSubscript: "newestExport" as NSString)
         native.setObject(unsafeBitCast(http, to: AnyObject.self), forKeyedSubscript: "http" as NSString)
         native.setObject(unsafeBitCast(token, to: AnyObject.self), forKeyedSubscript: "token" as NSString)
         native.setObject(unsafeBitCast(now, to: AnyObject.self), forKeyedSubscript: "now" as NSString)
+        native.setObject(unsafeBitCast(logRun, to: AnyObject.self), forKeyedSubscript: "logRun" as NSString)
         c.setObject(native, forKeyedSubscript: "native" as NSString)
         c.evaluateScript("var __mods = {};")
 

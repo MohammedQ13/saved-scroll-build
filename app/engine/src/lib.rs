@@ -32,6 +32,7 @@ const PAIR_WINDOW: Duration = Duration::from_secs(180);
 /// When the app last came to the front (ms since the Unix epoch). Reopens the 3-minute pairing window,
 /// so the user never has to force-close the app to connect (set by `ss_engine_app_active`).
 pub static APP_ACTIVE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static APP_IN_FRONT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
@@ -47,6 +48,7 @@ pub trait Device {
     async fn end(&mut self);
     async fn drag(&mut self, x1: u16, y1: u16, x2: u16, y2: u16, steps: u32, delay_ms: u64) -> Result<(), String>;
     async fn tap(&mut self, x: u16, y: u16) -> Result<(), String>;
+    async fn on_saved_grid(&mut self) -> bool { true }
     fn connected(&self) -> bool;
 }
 
@@ -56,6 +58,7 @@ pub struct MockDevice {
     pub log: Vec<String>,
     pub sessions: u32,
     pub ok: bool,
+    pub off_grid: bool,
 }
 impl MockDevice {
     pub fn new() -> Self { Self { ok: true, ..Default::default() } }
@@ -70,6 +73,7 @@ impl Device for MockDevice {
         Ok(())
     }
     async fn tap(&mut self, x: u16, y: u16) -> Result<(), String> { self.log.push(format!("tap {x} {y}")); Ok(()) }
+    async fn on_saved_grid(&mut self) -> bool { !self.off_grid }
     fn connected(&self) -> bool { self.ok }
 }
 
@@ -86,6 +90,8 @@ pub struct Status {
     pub last_error: String,
     /// When the last check macro finished (ms since 1970), so the app can tell it was brought forward by it.
     pub check_end_ms: u64,
+    pub check_failed: bool,
+    pub run_id: u64,
 }
 
 pub struct Engine<D: Device> {
@@ -93,8 +99,8 @@ pub struct Engine<D: Device> {
     pub status: Arc<Mutex<Status>>,
     pub token: String,
     pub check_macro: RefCell<String>,
-    /// Run the check macro after this dive (`/dive?check=0` skips it: window nudges, test dives).
-    check_this: RefCell<bool>,
+    /// Alternate rows used to corroborate a landing.
+    alternate_checks: RefCell<[String; 2]>,
     pub auto_check: RefCell<bool>,
     started: Instant,
     stop: Rc<RefCell<bool>>,
@@ -127,7 +133,7 @@ impl<D: Device + 'static> Engine<D> {
             status: Arc::new(Mutex::new(Status::default())),
             token: token.unwrap_or_else(random_token),
             check_macro: RefCell::new(String::new()),
-            check_this: RefCell::new(true),
+            alternate_checks: RefCell::new(Default::default()),
             auto_check: RefCell::new(false),
             started: Instant::now(),
             stop: Rc::new(RefCell::new(false)),
@@ -144,6 +150,7 @@ impl<D: Device + 'static> Engine<D> {
             "busy": s.busy && !s.checking, "checking": s.checking, "done": s.done, "planned": s.planned,
             "preDone": s.pre_done, "pre": s.pre, "autoCheck": *self.auto_check.borrow(), "checkEndMs": s.check_end_ms,
             "hasCheckMacro": !self.check_macro.borrow().is_empty(), "error": s.last_error,
+            "runId": s.run_id, "checkFailed": s.check_failed,
         })
     }
 
@@ -156,7 +163,7 @@ impl<D: Device + 'static> Engine<D> {
         }
     }
 
-    pub async fn dive(self: &Rc<Self>, n: u32, iv: u64, dy: i64, dur: u64, pn: u32, piv: u64, pdy: i64) -> serde_json::Value {
+    async fn dive(self: &Rc<Self>, n: u32, iv: u64, dy: i64, dur: u64, pn: u32, piv: u64, pdy: i64, check: String, verify: bool) -> serde_json::Value {
         // Finish with any running dive first: it holds the device while mid-swipe.
         let checking = self.status.lock().unwrap().checking;
         if !checking { self.stop_now().await; }
@@ -170,21 +177,39 @@ impl<D: Device + 'static> Engine<D> {
         }
         self.set(|s| s.connected = true);
         *self.stop.borrow_mut() = false;
-        self.set(|s| { s.busy = true; s.done = 0; s.planned = n; s.pre_done = 0; s.pre = pn; s.last_error.clear(); });
+        self.set(|s| {
+            s.busy = true; s.done = 0; s.planned = n; s.pre_done = 0; s.pre = pn;
+            s.last_error.clear(); s.check_failed = false; s.check_end_ms = 0; s.run_id += 1;
+        });
+        let run_id = self.status.lock().unwrap().run_id;
         let me = self.clone();
-        let h = tokio::task::spawn_local(async move { me.run_dive(n, iv, dy, dur, pn, piv, pdy).await; });
+        let h = tokio::task::spawn_local(async move { me.run_dive(n, iv, dy, dur, pn, piv, pdy, &check, verify).await; });
         *self.task.borrow_mut() = Some(h);
-        serde_json::json!({"ok": true, "planned": n, "pre": pn, "seconds": (n as u64 * iv + pn as u64 * piv) / 1000})
+        serde_json::json!({"ok": true, "planned": n, "pre": pn, "runId": run_id, "seconds": (n as u64 * iv + pn as u64 * piv) / 1000})
     }
 
-    async fn run_dive(self: &Rc<Self>, n: u32, iv: u64, dy: i64, dur: u64, pn: u32, piv: u64, pdy: i64) {
+    async fn run_dive(self: &Rc<Self>, n: u32, iv: u64, dy: i64, dur: u64, pn: u32, piv: u64, pdy: i64, check: &str, verify: bool) {
+        let in_front = || APP_IN_FRONT.load(std::sync::atomic::Ordering::Relaxed);
         let stop = self.stop.clone();
+        // A manual landing can queue a legacy continuation before the app reopens TikTok.
+        for _ in 0..30 {
+            if !in_front() || *stop.borrow() { break; }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if in_front() || *stop.borrow() {
+            self.set(|s| { s.busy = false; s.last_error = "Open TikTok's Saved grid".into(); });
+            return;
+        }
+        if verify && !self.dev.borrow_mut().on_saved_grid().await {
+            self.set(|s| { s.busy = false; s.last_error = "Open TikTok's Saved grid".into(); });
+            return;
+        }
         if let Err(e) = self.dev.borrow_mut().begin().await {
             self.set(|s| { s.busy = false; s.last_error = e; });
             return;
         }
         for i in 0..pn {
-            if *stop.borrow() { break; }
+            if *stop.borrow() || in_front() { break; }
             let t0 = Instant::now();
             let (x1, y1, x2, y2, st, d) = swipe_gesture(self.swipe_x, self.swipe_y, pdy, dur);
             let _ = self.dev.borrow_mut().drag(x1, y1, x2, y2, st, d).await;
@@ -193,7 +218,7 @@ impl<D: Device + 'static> Engine<D> {
         }
         if pn > 0 { Self::sleep_or_stop(&stop, 1500).await; }
         for i in 0..n {
-            if *stop.borrow() { break; }
+            if *stop.borrow() || in_front() { break; }
             let t0 = Instant::now();
             let (x1, y1, x2, y2, st, d) = swipe_gesture(self.swipe_x, self.swipe_y, dy, dur);
             if let Err(e) = self.dev.borrow_mut().drag(x1, y1, x2, y2, st, d).await {
@@ -203,12 +228,12 @@ impl<D: Device + 'static> Engine<D> {
             self.set(|s| s.done = i + 1);
             Self::sleep_or_stop(&stop, iv.saturating_sub(t0.elapsed().as_millis() as u64)).await;
         }
-        let run_check = !*stop.borrow() && *self.auto_check.borrow() && *self.check_this.borrow() && !self.check_macro.borrow().is_empty();
+        let run_check = !*stop.borrow() && !in_front() && *self.auto_check.borrow() && !check.is_empty() &&
+            self.status.lock().unwrap().last_error.is_empty();
         if run_check {
             self.set(|s| s.checking = true);
             Self::sleep_or_stop(&stop, 800).await;
-            let m = self.check_macro.borrow().clone();
-            self.run_macro(&m).await;
+            self.run_macro(check).await;
             self.set(|s| s.check_end_ms = now_ms());
         }
         self.dev.borrow_mut().end().await;
@@ -225,12 +250,15 @@ impl<D: Device + 'static> Engine<D> {
         serde_json::json!({"ok": true, "stopped": true})
     }
 
-    /// Steps separated by ';' with normalised coordinates: T x y | D x1 y1 x2 y2 ms | W ms | S dy ms.
+    /// Steps separated by ';' with normalised coordinates. R tries the status-bar return link, then PiP.
     pub async fn run_macro(&self, steps: &str) {
+        let mut grid_failed = false;
         for st in steps.split(';').map(str::trim).filter(|s| !s.is_empty()) {
             if *self.stop.borrow() { break; }
             let mut it = st.split_whitespace();
             let op = it.next().unwrap_or("");
+            if APP_IN_FRONT.load(std::sync::atomic::Ordering::Relaxed) { break; }
+            if grid_failed && op != "R" { continue; }
             let a: Vec<i64> = it.filter_map(|v| v.parse::<f64>().ok().map(|f| f as i64)).collect();
             let u = |i: usize| a.get(i).copied().unwrap_or(0).clamp(0, FULL) as u16;
             match op {
@@ -240,6 +268,25 @@ impl<D: Device + 'static> Engine<D> {
                     let _ = self.dev.borrow_mut().drag(u(0), u(1), u(2), u(3), 12, ms / 12).await;
                 }
                 "W" => Self::sleep_or_stop(&self.stop, a.first().copied().unwrap_or(0).max(0) as u64).await,
+                "G" => {
+                    grid_failed = !self.dev.borrow_mut().on_saved_grid().await;
+                    if grid_failed { self.set(|s| s.last_error = "Could not verify the Saved grid".into()); }
+                }
+                "R" => {
+                    use std::sync::atomic::Ordering::Relaxed;
+                    let before = APP_ACTIVE_MS.load(Relaxed);
+                    let _ = self.dev.borrow_mut().tap(u(0), u(1)).await;
+                    Self::sleep_or_stop(&self.stop, 750).await;
+                    if !*self.stop.borrow() && APP_ACTIVE_MS.load(Relaxed) == before {
+                        let _ = self.dev.borrow_mut().tap(u(2), u(3)).await;
+                        Self::sleep_or_stop(&self.stop, 800).await;
+                        if !*self.stop.borrow() && APP_ACTIVE_MS.load(Relaxed) == before {
+                            let _ = self.dev.borrow_mut().tap(u(4), u(5)).await;
+                            Self::sleep_or_stop(&self.stop, 750).await;
+                        }
+                    }
+                    self.set(|s| s.check_failed = grid_failed || APP_ACTIVE_MS.load(Relaxed) == before);
+                }
                 "S" => {
                     let (x1, y1, x2, y2, s, d) = swipe_gesture(self.swipe_x, self.swipe_y, a.first().copied().unwrap_or(400), a.get(1).copied().unwrap_or(180).max(30) as u64);
                     let _ = self.dev.borrow_mut().drag(x1, y1, x2, y2, s, d).await;
@@ -269,9 +316,17 @@ impl<D: Device + 'static> Engine<D> {
         let busy = self.status.lock().unwrap().busy;
         match path {
             "/status" => (200, self.status_json()),
-            "/dive" => (200, { *self.check_this.borrow_mut() = num("check", 1) != 0; self.dive(num("n", 10).clamp(0, 2000) as u32, num("iv", 1000).clamp(150, 10000) as u64, num("dy", 400).clamp(-2000, 2000),
+            "/dive" if busy && num("idle", 0) == 1 => (200, serde_json::json!({"ok": false, "error": "busy"})),
+            "/dive" => (200, {
+                let check = if num("check", 1) == 0 { String::new() } else {
+                    match num("row", 0) {
+                        r @ 1..=2 => self.alternate_checks.borrow()[(r - 1) as usize].clone(),
+                        _ => self.check_macro.borrow().clone(),
+                    }
+                };
+                self.dive(num("n", 10).clamp(0, 2000) as u32, num("iv", 1000).clamp(150, 10000) as u64, num("dy", 400).clamp(-2000, 2000),
                                      num("dur", 180).clamp(40, 2000) as u64, num("pn", 0).clamp(0, 2000) as u32, num("piv", 700).clamp(150, 10000) as u64,
-                                     num("pdy", -400).clamp(-2000, 2000)).await }),
+                                     num("pdy", -400).clamp(-2000, 2000), check, num("guard", 0) == 1).await }),
             "/stop" => (200, self.stop_now().await),
             "/swipe" => {
                 if busy { return (200, serde_json::json!({"ok": false, "error": "busy: stop the dive first"})); }
@@ -286,6 +341,12 @@ impl<D: Device + 'static> Engine<D> {
                 if q.get("save").map(String::as_str) == Some("check") && !s.is_empty() {
                     *self.check_macro.borrow_mut() = s;
                     return (200, serde_json::json!({"ok": true, "saved": "check"}));
+                }
+                if let Some(row) = q.get("save").and_then(|v| v.strip_prefix("check")).and_then(|v| v.parse::<usize>().ok()) {
+                    if (1..=2).contains(&row) && !s.is_empty() {
+                        self.alternate_checks.borrow_mut()[row - 1] = s;
+                        return (200, serde_json::json!({"ok": true}));
+                    }
                 }
                 if busy { return (200, serde_json::json!({"ok": false, "error": "busy"})); }
                 let m = if s.is_empty() { self.check_macro.borrow().clone() } else { s };

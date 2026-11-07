@@ -31,16 +31,19 @@ final class Engine: ObservableObject {
     /// button. The app then reads the copied link (background apps can't: L-25) and starts the next leg
     /// (Session.autoCheckIfDue). Positions measured on the user's phone 2026-11-06 (1206x2622 screen; OP-54,
     /// OP-56). Breaks if the floating window was dragged away from the top centre.
-    static let checkMacro: String = {
+    static let checkMacro = checkMacroFor(row: 0)
+
+    /// `row` 1 = the next row down (a grid row is ~530 px): the brain's "check one row lower" after an odd reading.
+    static func checkMacroFor(row: Int) -> String {
         func p(_ x: Double, _ y: Double) -> String { "\(Int(x * 65535 / 1206)) \(Int(y * 65535 / 2622))" }
         return ["W 1500",                                  // let the grid stop gliding (back-up legs: OP-57)
-                "T \(p(200, 950))", "W 1800",              // top-row video
+                "T \(p(200, 950 + Double(row) * 530))", "W 1800",   // top-row video (or the row below)
                 "T \(p(1113, 2057))", "W 1200",            // Share
                 "T \(p(327, 2168))", "W 900",              // Copy link
                 "D \(p(2, 1311)) \(p(844, 1311)) 300", "W 1200",   // back to the grid (left-edge swipe)
                 "T \(p(600, 380))", "W 800",               // floating window: show its controls
                 "T \(p(1105, 250))"].joined(separator: ";") // "back to app"
-    }()
+    }
 
     /// On by default; Settings can turn it off (then checks are manual: Copy link › Check where I landed).
     var autoCheckOn: Bool {

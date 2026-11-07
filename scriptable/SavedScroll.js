@@ -297,8 +297,14 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     let here = w.top;
     if (ob.outlier) {
       p.rechecks = (p.rechecks || 0) + 1;
-      if (p.rechecks === 1) return out({ ok: false, recheck: true, text: "That reading doesn't fit (maybe a video you re-saved recently). Copy the link of a video one row lower then button › Check where I landed again." });
-      here = Math.round(ob.expected);                        // second odd reading: carry on from the planned spot
+      if (p.rechecks === 1) { p.oddAt = w.top; return out({ ok: false, recheck: true, text: `${describe(w)}
+That reading doesn't fit the plan (maybe a video you re-saved recently). Copy the link of a video one row lower then button › Check where I landed again.` }); }
+      if (p.oddAt != null && Math.abs(w.top - p.oddAt) < 150 && w.top >= p.pl.from - 50) {   // above the start can't be real
+        // Two neighbouring readings agree: the plan was off, not the reading (device 2026-11-06: a leg fell far
+        // short and the brain carried on from the planned spot ~900 saves too deep). Trust them and learn.
+        nav.observe(brain, p.pl, { landed: w.top, at: now, trust: true });
+        here = w.top;
+      } else here = Math.round(ob.expected);                 // readings disagree: carry on from the planned spot
     }
     p.rechecks = 0;
     state.knownEst = { top: here, at: now };

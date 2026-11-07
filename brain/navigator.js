@@ -160,9 +160,9 @@ function warmLogPerStroke(state, r) {
 // Returns { outlier: true } when the reading doesn't fit the plan (e.g. the checked video was
 // re-saved since the export, so the index still has its old position). Then nothing is learned
 // and the caller should check a neighbouring video instead.
-function observe(state, pl, { landed, mistap = false, at = Date.now() }) {
+function observe(state, pl, { landed, mistap = false, at = Date.now(), trust = false }) {
   const minutes = Math.max(pl.seconds / 60, 1 / 6);
-  if (!mistap) {
+  if (!mistap && !trust) {   // trust: two readings agreed, so the plan was wrong, not the reading
     const warmSpeed = pl.warmSpeed, wt = Math.min(pl.seconds, pl.warmDist / warmSpeed);
     const expected = pl.from + wt * warmSpeed + Math.max(0, pl.seconds - wt) * pl.expectedSpeed;
     // Off by more than ~3 standard deviations (in log terms), or behind the start: don't trust it.

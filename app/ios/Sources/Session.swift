@@ -104,10 +104,14 @@ final class Session: ObservableObject {
         message = Session.short(r["text"] as? String)
         ssLog.notice("check: \(message.replacingOccurrences(of: "\n", with: " | "))")
         let more = (r["remote"] as? Bool) == true
+        lastCheckWantsRecheck = (r["recheck"] as? Bool) == true
         if more { openTikTok() }      // another leg started: watch it in TikTok
         await refresh()
         return more
     }
+
+    /// The brain asked for a second reading one row lower (an odd reading).
+    private(set) var lastCheckWantsRecheck = false
 
     /// The clipboard state we last checked with (or handed over to TikTok with), so an old copied link never
     /// counts as a new landing. nil until the app first becomes active: nothing is checked on launch.
@@ -135,6 +139,13 @@ final class Session: ObservableObject {
         ssLog.notice("auto-check: clipboard changed, checking")
         let more = await checkLanded()
         if !more { openTikTok() }                                    // done (or a problem): back to the spot
+        if lastCheckWantsRecheck && !more {
+            // Hands-free second reading: back in TikTok, the engine copies the link one row lower and brings us
+            // forward again (this function runs again then).
+            ssLog.notice("auto-check: odd reading, checking one row lower")
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            await Engine.shared.api("/macro", ["s": Engine.checkMacroFor(row: 1)])
+        }
     }
 
     @MainActor

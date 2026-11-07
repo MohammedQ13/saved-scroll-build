@@ -17,18 +17,38 @@ func ssScreenAnchor(_ bytes: UnsafePointer<UInt8>, _ count: Int, _ kind: Int32) 
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = level
         request.regionOfInterest = region
+        request.minimumTextHeight = 0.006
         let handler = VNImageRequestHandler(data: data, options: [:])
         do { try handler.perform([request]) } catch { return 0 }
-        let labels = (request.results ?? []).compactMap { result -> ScreenLabel? in
-            guard let value = result.topCandidates(1).first?.string else { return nil }
-            let box = result.boundingBox
-            return ScreenLabel(text: value.lowercased().trimmingCharacters(in: .whitespaces),
-                               x: region.minX + box.midX * region.width, y: 1 - region.minY - box.midY * region.height)
+        func label(_ text: String, _ box: CGRect) -> ScreenLabel {
+            ScreenLabel(text: text.lowercased().trimmingCharacters(in: .whitespaces),
+                        x: region.minX + box.midX * region.width, y: 1 - region.minY - box.midY * region.height)
+        }
+        let phrases = kind == 0 ? ["search saved posts", "posts ", "collections", "sounds"] :
+                      kind == 2 ? ["send to", "copy link"] : []
+        let labels = (request.results ?? []).flatMap { result -> [ScreenLabel] in
+            guard let candidate = result.topCandidates(1).first else { return [] }
+            let pieces = phrases.compactMap { phrase -> ScreenLabel? in
+                guard let range = candidate.string.range(of: phrase, options: .caseInsensitive),
+                      let box = try? candidate.boundingBox(for: range) else { return nil }
+                return label(phrase, box.boundingBox)
+            }
+            return [label(candidate.string, result.boundingBox)] + pieces
         }
         let anchor = kind == 0 ? gridAnchor(labels) : kind == 1 ? shareAnchor(labels) : copyAnchor(labels)
         if let anchor, (0..<1).contains(anchor) { return Int32(anchor * 65535) }
     }
+    #if os(iOS)
+    ssLog.notice("screen anchor \(kind): no matching layout")
+    #endif
     return 0
+}
+
+@_cdecl("ss_screen_capture_failed")
+func ssScreenCaptureFailed(_ kind: Int32, _ timedOut: Int32) {
+    #if os(iOS)
+    ssLog.notice("screen anchor \(kind): capture \(timedOut == 1 ? "timed out" : "failed")")
+    #endif
 }
 
 @_cdecl("ss_is_saved_grid")
@@ -51,7 +71,7 @@ private func gridAnchor(_ labels: [ScreenLabel]) -> CGFloat? {
     }
     // At the top, search is an icon. Require the three Saved subtabs in order
     // on the same line before treating the content below them as a tile.
-    guard let posts = labels.first(where: { $0.x < 0.24 && $0.text.hasPrefix("posts ") }),
+    guard let posts = labels.first(where: { $0.x < 0.24 && (0.15...0.46).contains($0.y) && ($0.text == "posts" || $0.text.hasPrefix("posts ")) }),
           labels.contains(where: { (0.26...0.54).contains($0.x) && $0.text.hasPrefix("collections") && abs($0.y - posts.y) < 0.012 }),
           labels.contains(where: { (0.55...0.76).contains($0.x) && $0.text.hasPrefix("sounds") && abs($0.y - posts.y) < 0.012 })
     else { return nil }

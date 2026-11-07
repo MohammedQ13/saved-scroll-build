@@ -61,8 +61,11 @@ enum SavedGridProbe {
         checkAnchor("Copy link", kind: 2, expected: 0.784, lines: [
             ("Send to", 0.5, 0.593), ("Copy link", 0.27, 0.827),
         ])
+        checkAnchor("Copy link in a merged row", kind: 2, expected: 0.784, lines: [
+            ("Send to", 0.5, 0.593), ("Repost  Copy link  WhatsApp", 0.29, 0.827),
+        ])
         checkAnchor("Copy without share sheet", kind: 2, expected: 0, lines: [("Copy link", 0.27, 0.827)])
-        print("Vision passed \(fixtures.count + 5) synthetic screen checks.")
+        print("Vision passed \(fixtures.count + 6) synthetic screen checks.")
     }
 
     static func checkAnchor(_ name: String, kind: Int32, expected: CGFloat, lines: [(String, CGFloat, CGFloat)]) {

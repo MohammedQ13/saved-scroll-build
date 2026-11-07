@@ -237,19 +237,23 @@ impl Device for PhoneDevice {
 
     #[cfg(target_os = "ios")]
     async fn screen_anchor(&mut self, kind: i32) -> Option<u16> {
-        use idevice::dvt::{remote_server::RemoteServerClient, screenshot::ScreenshotClient};
-        extern "C" { fn ss_screen_anchor(data: *const u8, length: usize, kind: i32) -> i32; }
+        use idevice::core_device::{ImageFormat, ScreenCaptureServiceClient};
+        extern "C" {
+            fn ss_screen_anchor(data: *const u8, length: usize, kind: i32) -> i32;
+            fn ss_screen_capture_failed(kind: i32, timed_out: i32);
+        }
         let snapshot = async {
             let adapter = self.adapter.as_mut().ok_or(idevice::IdeviceError::NotFound)?;
             let hs = self.handshake.as_mut().ok_or(idevice::IdeviceError::NotFound)?;
-            let mut server = RemoteServerClient::connect_rsd(adapter, hs).await?;
-            server.read_message(0).await?;
-            let mut client = ScreenshotClient::new(&mut server).await?;
-            client.take_screenshot().await
+            let mut client = ScreenCaptureServiceClient::connect_rsd(adapter, hs).await?;
+            client.take_screenshot(None, ImageFormat::Png).await
         };
-        match tokio::time::timeout(std::time::Duration::from_secs(3), snapshot).await {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), snapshot).await {
             Ok(Ok(data)) => u16::try_from(unsafe { ss_screen_anchor(data.as_ptr(), data.len(), kind) }).ok().filter(|&y| y != 0),
-            _ => None,
+            failure => {
+                unsafe { ss_screen_capture_failed(kind, if failure.is_err() { 1 } else { 0 }); }
+                None
+            }
         }
     }
 

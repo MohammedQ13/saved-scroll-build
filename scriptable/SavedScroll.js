@@ -454,7 +454,7 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
       const prior = env.v2Prior?.();
       if (prior && prior.trainedThrough > (state.learnedV2?.trainedThrough || 0)) state.learnedV2 = prior;
       const precision = !a.period || a.period.end - a.period.start <= 26 * 3600000;
-      const jump = v2.create(a.rank, lib.meta.total, { cache, leading: precision });
+      const jump = v2.create(a.rank, lib.meta.total, { cache, leading: precision, verifySpan: cmd.strict === true });
       Object.assign(jump, { label: a.label, period: a.period, precision, goal: a, run: now, context: cmd.context || {}, action: v2.check() });
       state.jumpV2 = jump;
       state.armed = state.pending = null;

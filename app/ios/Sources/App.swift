@@ -337,6 +337,7 @@ struct SettingsView: View {
     @State private var applePassword = ""
     @State private var importingPairing = false
     @AppStorage("calibrate-swipe-timing") private var calibrateSwipeTiming = false
+    @AppStorage("verify-wide-landing") private var verifyWideLanding = false
 
     var body: some View {
         ScrollView {
@@ -364,6 +365,11 @@ struct SettingsView: View {
                 Card(title: "Swipe calibration") {
                     Toggle("Collect timing trials", isOn: $calibrateSwipeTiming)
                     Text("Uses short test legs at 1.0, 1.15, or 1.4 seconds per swipe. Leave this off for regular jumps.")
+                        .font(Theme.mono(11)).foregroundStyle(Theme.dim)
+                }
+                Card(title: "Landing verification") {
+                    Toggle("Verify across more saves", isOn: $verifyWideLanding)
+                    Text("Checks a wider stretch of the grid before confirming. Useful after re-saving a group of older videos.")
                         .font(Theme.mono(11)).foregroundStyle(Theme.dim)
                 }
                 Card(title: "Stay signed") {

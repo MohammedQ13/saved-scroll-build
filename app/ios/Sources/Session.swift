@@ -89,7 +89,8 @@ final class Session: ObservableObject {
     enum StartFrom { case automatic, top, viaTop, copied }
     @MainActor
     private func startCommand(_ from: StartFrom) -> [String: Any] {
-        var c: [String: Any] = ["cmd": "start", "context": context()]
+        var c: [String: Any] = ["cmd": "start", "context": context(),
+            "strict": UserDefaults.standard.bool(forKey: "verify-wide-landing")]
         switch from {
         case .automatic: c["auto"] = true
         case .top: c["top"] = true

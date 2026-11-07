@@ -8,7 +8,7 @@ struct SavedScrollApp: App {
     init() { Refresher.shared.register() }       // background tasks must be registered at launch
     var body: some Scene {
         WindowGroup { HomeView().preferredColorScheme(.dark) }
-            .onChange(of: phase) { _, p in
+            .onChange(of: phase, initial: true) { _, p in
                 if p == .active {
                     ss_engine_app_active()
                     Task { await Session.shared.refresh(); await Session.shared.autoCheckIfDue() }
@@ -165,8 +165,14 @@ struct HomeView: View {
                 RowButton(icon: "square.and.arrow.down", title: "Import TikTok export", detail: "user_data_tiktok.json from Files") { importing = true }
                 RowButton(icon: "waveform.path", title: "Test dive", detail: "20 swipes. Leave TikTok on your Saved tab first.") { session.testDive() }
             } else {
-                RowButton(icon: "calendar", title: "A month", detail: "year › month, with save counts") { picker = .month }
+                RowButton(icon: "calendar", title: "A year or month", detail: "with save counts") { picker = .month }
                 RowButton(icon: "calendar.day.timeline.left", title: "A day", detail: "year › month › day") { picker = .day }
+                RowButton(icon: "clock", title: "A time of day", detail: "year › month › day › hour") { picker = .time }
+                if let last = session.lastLanding {
+                    RowButton(icon: "arrow.uturn.backward", title: "Last landing", detail: "saved \(last)") {
+                        Task { await session.plan("last-landing") }
+                    }
+                }
                 RowButton(icon: "link", title: "The copied video", detail: "copy a link in TikTok first (Share › Copy link)") {
                     if let clip = Session.clipboard() { Task { await session.plan(clip) } } else { session.message = "Copy a video link in TikTok first." }
                 }
@@ -191,7 +197,9 @@ struct HomeView: View {
     private func armedCard(_ label: String) -> some View {
         Card(title: "Ready to go") {
             Text(label).font(Theme.mono(15, .bold)).foregroundStyle(Theme.text)
-            Text("Leave TikTok on your Saved grid. Go finds your current position.").font(Theme.mono(10)).foregroundStyle(Theme.warn)
+            Text(session.autoLocate ? "Leave TikTok on your Saved grid. Go finds your current position." :
+                "Leave TikTok on your Saved grid, then choose a starting point.")
+                .font(Theme.mono(10)).foregroundStyle(Theme.warn)
             if session.autoLocate {
                 PrimaryButton(title: "Go", icon: "location.fill") { session.go(.automatic) }
             } else {
@@ -205,17 +213,24 @@ struct HomeView: View {
 
 // MARK: - Go-to picker (year › month › day)
 struct GoToSheet: View {
-    enum Mode: String, Identifiable { case month, day; var id: String { rawValue } }
+    enum Mode: String, Identifiable { case month, day, time; var id: String { rawValue } }
     let mode: Mode
     @Environment(\.dismiss) private var dismiss
     @State private var rows: [[String: Any]] = []
     @State private var year: Int?
     @State private var month: Int?
+    @State private var day: Int?
+    @State private var loading = true
     private let monthNames = Calendar(identifier: .gregorian).monthSymbols
 
     var body: some View {
         NavigationStack {
             List {
+                if mode == .month, let year, month == nil {
+                    Button("Jump to \(year)") { go(String(year)) }
+                        .listRowBackground(Theme.panel)
+                        .disabled(loading)
+                }
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, r in
                     Button { pick(r) } label: {
                         HStack {
@@ -225,36 +240,83 @@ struct GoToSheet: View {
                         }
                     }
                     .listRowBackground(Theme.panel)
+                    .disabled(loading)
                 }
             }
+            .overlay { if loading { ProgressView() } }
             .scrollContentBackground(.hidden)
             .background(Theme.bg)
-            .navigationTitle(year == nil ? "Year" : (month == nil ? "\(year!)" : "\(monthNames[month! - 1]) \(year!)"))
+            .navigationTitle(sectionTitle)
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                if year != nil {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Back", systemImage: "chevron.left") { goBack() }
+                    }
+                }
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+            }
         }
-        .task { rows = await Session.shared.calendar() }
+        .task { await refreshRows() }
+    }
+
+    private var sectionTitle: String {
+        guard let year else { return "Year" }
+        guard let month else { return String(year) }
+        if let day { return "\(day) \(monthNames[month - 1]) \(year)" }
+        return "\(monthNames[month - 1]) \(year)"
     }
 
     private func title(_ r: [String: Any]) -> String {
+        if let h = r["hour"] as? Int { return String(format: "%02d:00", h) }
         if let d = r["day"] as? Int { return String(format: "%02d", d) }
         if let m = r["month"] as? Int { return monthNames[m - 1] }
         return "\(r["year"] as? Int ?? 0)"
     }
 
     private func pick(_ r: [String: Any]) {
+        if let h = r["hour"] as? Int, let y = year, let m = month, let d = day {
+            go(String(format: "%04d-%02d-%02dT%02d", y, m, d, h)); return
+        }
         if let d = r["day"] as? Int, let y = year, let m = month {
+            if mode == .time {
+                day = d
+                reload()
+                return
+            }
             go(String(format: "%04d-%02d-%02d", y, m, d)); return
         }
         if let m = r["month"] as? Int, let y = year {
             if mode == .month { go(String(format: "%04d-%02d", y, m)); return }
             month = m
-            Task { rows = await Session.shared.calendar(year: y, month: m) }
+            reload()
             return
         }
         if let y = r["year"] as? Int {
             year = y
-            Task { rows = await Session.shared.calendar(year: y) }
+            reload()
         }
+    }
+
+    private func goBack() {
+        if day != nil { day = nil }
+        else if month != nil { month = nil }
+        else { year = nil }
+        reload()
+    }
+
+    private func reload() {
+        loading = true
+        rows = []
+        Task { await refreshRows() }
+    }
+
+    private func refreshRows() async {
+        let y = year, m = month, d = day
+        let result = await Session.shared.calendar(year: y, month: m, day: d)
+        guard !Task.isCancelled, year == y, month == m, day == d else { return }
+        rows = result
+        loading = false
     }
 
     private func go(_ target: String) {
@@ -274,6 +336,7 @@ struct SettingsView: View {
     @State private var appleID = ""
     @State private var applePassword = ""
     @State private var importingPairing = false
+    @AppStorage("calibrate-swipe-timing") private var calibrateSwipeTiming = false
 
     var body: some View {
         ScrollView {
@@ -296,6 +359,11 @@ struct SettingsView: View {
                 }
                 Card(title: "Automatic window (Shortcuts)") {
                     Text("Shortcuts › Automation › + › App › TikTok:\n• Is Opened › Run Immediately › Show Saved Scroll window\n• Is Closed › Run Immediately › Hide Saved Scroll window\nBack Tap (optional): Settings › Accessibility › Touch › Back Tap › Double Tap › Saved Scroll menu")
+                        .font(Theme.mono(11)).foregroundStyle(Theme.dim)
+                }
+                Card(title: "Swipe calibration") {
+                    Toggle("Collect timing trials", isOn: $calibrateSwipeTiming)
+                    Text("Uses short test legs at 1.0, 1.15, or 1.4 seconds per swipe. Leave this off for regular jumps.")
                         .font(Theme.mono(11)).foregroundStyle(Theme.dim)
                 }
                 Card(title: "Stay signed") {

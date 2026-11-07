@@ -18,6 +18,9 @@ final class Session: ObservableObject {
     @Published var hasPending = false             // a multi-leg jump waiting for "Check where I landed"
     @Published var working = false
     @Published var autoLocate = false
+    @Published var lastLanding: String?
+    private(set) var verifiedAt = Date.distantPast
+    private(set) var targetObserved = false
 
     private var handoff = 0
     private let network = NWPathMonitor()
@@ -53,6 +56,7 @@ final class Session: ObservableObject {
         armed = (info["armed"] as? String)?.components(separatedBy: "\n").first
         hasPending = (info["pending"] as? Bool) == true
         autoLocate = (info["autoCheck"] as? Bool) == true
+        lastLanding = info["lastLanding"] as? String
         pins = info["pins"] as? [[String: Any]] ?? []
         if indexed {
             let st = await Brain.shared.run(["cmd": "status"])
@@ -62,17 +66,19 @@ final class Session: ObservableObject {
     }
 
     // MARK: brain calls used by the screens
-    func calendar(year: Int? = nil, month: Int? = nil) async -> [[String: Any]] {
+    func calendar(year: Int? = nil, month: Int? = nil, day: Int? = nil) async -> [[String: Any]] {
         var c: [String: Any] = ["cmd": "calendar"]
         if let year { c["year"] = year }
         if let month { c["month"] = month }
+        if let day { c["day"] = day }
         let r = await Brain.shared.run(c)
-        return (r["days"] ?? r["months"] ?? r["years"]) as? [[String: Any]] ?? []
+        return (r["hours"] ?? r["days"] ?? r["months"] ?? r["years"]) as? [[String: Any]] ?? []
     }
 
     /// Choose a target: "2025-05", "2025-05-14", a video link, "pin" / "pin:2".
     @MainActor
     func plan(_ target: String) async {
+        verifiedAt = .distantPast
         working = true; defer { working = false }
         let r = await Brain.shared.run(["cmd": "plan", "target": target])
         message = Session.short(r["text"] as? String)
@@ -105,6 +111,19 @@ final class Session: ObservableObject {
         guard UIApplication.shared.applicationState == .background else { return }
         checkedPaste = UIPasteboard.general.changeCount
         await runHandoff(startCommand(from), ticket: handoff)
+    }
+
+    /// Back Tap's menus may still be dismissing when the intent returns.
+    @MainActor
+    func startAfterMenu(advance: Bool) {
+        handoff += 1
+        let ticket = handoff
+        let command: [String: Any] = advance ? ["cmd": "advance"] : startCommand(.automatic)
+        checkedPaste = UIPasteboard.general.changeCount
+        Task {
+            try? await Task.sleep(nanoseconds: 1_800_000_000)
+            await runHandoff(command, ticket: ticket)
+        }
     }
 
     @MainActor
@@ -144,22 +163,30 @@ final class Session: ObservableObject {
     @MainActor
     func stop() async {
         handoff += 1
+        verifiedAt = .distantPast
         Engine.shared.stopDive()
         _ = await Brain.shared.run(["cmd": "remote-stop"])
+        await refresh()
     }
 
     /// After a leg: the user copied the link of a video near the top in TikTok.
     /// Returns true when another leg started (the app then goes back to TikTok).
     @MainActor @discardableResult
-    func checkLanded() async -> Bool {
-        guard let clip = Session.clipboard() else { message = "Copy a video link in TikTok first (Share › Copy link)."; return false }
+    func checkLanded(missingLink: Bool = false) async -> Bool {
+        let clip = missingLink ? "" : Session.clipboard()
+        guard let clip else { message = "Copy a video link in TikTok first (Share › Copy link)."; return false }
         checkedPaste = UIPasteboard.general.changeCount
-        let r = await Brain.shared.run(["cmd": "arrived", "link": clip, "context": context()])
+        let r = await Brain.shared.run(["cmd": "arrived", "link": clip, "context": context(),
+            "calibrate": UserDefaults.standard.bool(forKey: "calibrate-swipe-timing")])
         message = Session.short(r["text"] as? String)
         ssLog.notice("check: \(message.replacingOccurrences(of: "\n", with: " | "))")
         let resume = (r["resume"] as? Bool) == true
         let more = resume || (r["remote"] as? Bool) == true
         lastCheckWantsRecheck = (r["recheck"] as? Bool) == true
+        if (r["done"] as? Bool) == true && r["error"] is NSNumber {
+            verifiedAt = Date()
+            targetObserved = (r["targetObserved"] as? Bool) == true
+        }
         if more { openTikTok(then: resume ? ["cmd": "advance"] : nil) }
         if (r["ok"] as? Bool) == false && !lastCheckWantsRecheck { Session.notify("Saved Scroll", message) }
         await refresh()
@@ -191,23 +218,15 @@ final class Session: ObservableObject {
         let info = await Brain.shared.run(["cmd": "menu-info"])
         guard (info["pending"] as? Bool) == true else { if viaMacro { ssLog.notice("auto-check: no jump pending, back to TikTok"); openTikTok() }; return }
         guard Engine.shared.autoCheckOn else { return }
-        if now == last || Session.clipboard() == nil {
-            if viaMacro {
-                let r = await Brain.shared.run(["cmd": "check-failed"])
-                message = Session.short(r["text"] as? String)
-                Session.notify("Saved Scroll", message)
-                await refresh()
-                openTikTok()
-            }
-            return
-        }
+        let missingLink = now == last || Session.clipboard() == nil
+        if missingLink && !viaMacro { return }
         for _ in 0..<20 {                                            // ≤4 s for the engine to finish the macro
             Engine.shared.refresh()
             if !Engine.shared.busy && (Engine.shared.status["checking"] as? Bool) != true { break }
             try? await Task.sleep(nanoseconds: 200_000_000)
         }
-        ssLog.notice("auto-check: clipboard changed, checking")
-        let more = await checkLanded()
+        ssLog.notice("auto-check: checking, fresh link=\(!missingLink)")
+        let more = await checkLanded(missingLink: missingLink)
         if !more { openTikTok() }                                    // done (or a problem): back to the spot
         if lastCheckWantsRecheck && !more {
             // Hands-free second reading: back in TikTok, the engine copies the link one row lower and brings us

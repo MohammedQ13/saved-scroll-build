@@ -9,6 +9,53 @@
 //   from "Where am I?", so the estimate only affects the first leg.
 
 const DAY = 86400000;
+const civilFormats = new Map(), civilStarts = new Map();
+
+function civilDate(ts, timeZone) {
+  if (!timeZone || timeZone === "UTC") {
+    const d = new Date(ts);
+    return [d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate()];
+  }
+  if (!civilFormats.has(timeZone)) {
+    civilFormats.set(timeZone, new Intl.DateTimeFormat("en-CA", {
+      timeZone, year: "numeric", month: "numeric", day: "numeric", calendar: "gregory",
+    }));
+  }
+  const parts = Object.fromEntries(civilFormats.get(timeZone).formatToParts(ts).map(p => [p.type, +p.value]));
+  return [parts.year, parts.month, parts.day];
+}
+
+const clockFormats = new Map();
+function civilClock(ts, timeZone = "UTC") {
+  if (timeZone === "UTC") {
+    const d = new Date(ts);
+    return [d.getUTCHours(), d.getUTCMinutes()];
+  }
+  if (!clockFormats.has(timeZone)) {
+    clockFormats.set(timeZone, new Intl.DateTimeFormat("en-CA", { timeZone, hour: "numeric", minute: "numeric", hourCycle: "h23" }));
+  }
+  const parts = clockFormats.get(timeZone).formatToParts(ts);
+  return [Number(parts.find(p => p.type === "hour").value), Number(parts.find(p => p.type === "minute").value)];
+}
+
+// Convert a local calendar boundary to an absolute instant. Search on civil
+// dates so DST gaps, short days and long days preserve the right membership.
+function civilStart(y, m, d, timeZone = "UTC") {
+  const nominal = Date.UTC(y, m - 1, d);
+  if (timeZone === "UTC") return nominal;
+  const key = timeZone + "/" + nominal;
+  if (!civilStarts.has(key)) {
+    let lo = nominal - DAY, hi = nominal + DAY;
+    while (hi - lo > 1) {
+      const mid = lo + Math.floor((hi - lo) / 2);
+      const [year, month, day] = civilDate(mid, timeZone);
+      if (Date.UTC(year, month - 1, day) < nominal) lo = mid;
+      else hi = mid;
+    }
+    civilStarts.set(key, hi);
+  }
+  return civilStarts.get(key);
+}
 
 // ---------- links ----------
 function linkToId(text) {
@@ -81,12 +128,32 @@ function loadIndex(text) {
   return { meta: JSON.parse(head), saves };
 }
 
+function resaveEvidence(older, newer) {
+  const evidence = [];
+  for (const save of newer) {
+    const before = older.get(save.id);
+    if (before && save.ts > before.ts + 60000) {
+      evidence.push({ id: save.id, firstSaved: before.ts, resavedAt: save.ts });
+    }
+  }
+  return evidence;
+}
+
+function mergeResaves(existing, observed) {
+  const unique = new Map(existing.map(r => [r.id + "/" + r.resavedAt, r]));
+  for (const r of observed) {
+    const key = r.id + "/" + r.resavedAt;
+    if (!unique.has(key) || r.firstSaved < unique.get(key).firstSaved) unique.set(key, r);
+  }
+  return [...unique.values()];
+}
+
 // ---------- library ----------
 class Library {
   constructor(index, store = {}) {
     this.saves = index.saves;            // newest first
     this.meta = index.meta;
-    this.byId = new Map(this.saves.map(s => [s.id, s]));
+    this.byId = index.byId || new Map(this.saves.map(s => [s.id, s]));
     this.store = Object.assign({ pins: [], phases: [], resaves: [], extraSaves: 0, session: null, survival: {} }, store);
   }
 
@@ -100,18 +167,34 @@ class Library {
   // binary search: index of first save with ts < t (saves are newest first)
   _firstOlder(t) { let lo = 0, hi = this.saves.length; while (lo < hi) { const m = (lo + hi) >> 1; if (this.saves[m].ts >= t) lo = m + 1; else hi = m; } return lo; }
 
-  // A calendar day (UTC midnight-based in this prototype; the phone uses local time).
-  day(y, m, d) {
-    const start = Date.UTC(y, m - 1, d), end = start + DAY;
+  day(y, m, d, timeZone = "UTC") {
+    const start = civilStart(y, m, d, timeZone), end = civilStart(y, m, d + 1, timeZone);
     const i0 = this._firstOlder(end), i1 = this._firstOlder(start);
-    if (i1 > i0) return { start, count: i1 - i0, newest: this.saves[i0], oldest: this.saves[i1 - 1], exact: true };
+    if (i1 > i0) return { start, end, count: i1 - i0, newest: this.saves[i0], oldest: this.saves[i1 - 1], exact: true };
     // empty day: nearest days with saves on each side
     const newer = i0 > 0 ? this.saves[i0 - 1] : null, older = i0 < this.saves.length ? this.saves[i0] : null;
-    return { start, count: 0, exact: false, newer, older };
+    return { start, end, count: 0, exact: false, newer, older };
   }
   range(fromTs, toTs) {
     const i0 = this._firstOlder(toTs), i1 = this._firstOlder(fromTs);
     return { count: Math.max(0, i1 - i0), newest: this.saves[i0], oldest: this.saves[i1 - 1] };
+  }
+
+  nearestToRange(start, end) {
+    const boundary = this._firstOlder(end);
+    const newer = this.saves[boundary - 1], older = this.saves[boundary];
+    if (!newer || !older) return newer || older;
+    return newer.ts - end <= start - older.ts ? newer : older;
+  }
+
+  savedTimes(y, m, d, timeZone = "UTC") {
+    const day = this.day(y, m, d, timeZone);
+    if (!day.count) return [];
+    const start = this.meta.total - day.newest.bottom;
+    return this.saves.slice(start, start + day.count).map(save => {
+      const [hour, minute] = civilClock(save.ts, timeZone);
+      return { save, hour, minute };
+    });
   }
 
   whereAmI(linkOrId, now = Date.now()) {
@@ -168,10 +251,8 @@ class Library {
 
   // ---------- monthly re-index: detect re-saves, keep pins valid ----------
   reindex(newIndex) {
-    const old = this.byId;
-    const resaves = [];
-    for (const s of newIndex.saves) { const o = old.get(s.id); if (o && s.ts > o.ts + 60000) resaves.push({ id: s.id, firstSaved: o.ts, resavedAt: s.ts }); }
-    const lib = new Library(newIndex, Object.assign({}, this.store, { resaves: [...this.store.resaves, ...resaves], extraSaves: 0 }));
+    const resaves = resaveEvidence(this.byId, newIndex.saves);
+    const lib = new Library(newIndex, Object.assign({}, this.store, { resaves: mergeResaves(this.store.resaves, resaves), extraSaves: 0 }));
     // Pins: re-anchor by video; if the video moved (re-saved) or is gone, anchor to the same save time.
     lib.store.pins = this.store.pins.map(p => {
       const s = lib.byId.get(p.id);
@@ -182,8 +263,15 @@ class Library {
     });
     return { lib, resaves };
   }
+  rememberOlder(index) {
+    const evidence = resaveEvidence(new Map(index.saves.map(s => [s.id, s])), this.saves);
+    this.store.resaves = mergeResaves(this.store.resaves, evidence);
+    return evidence.length;
+  }
   // Videos first saved inside a time range that have since been re-saved to the top.
-  resavedFrom(fromTs, toTs) { return this.store.resaves.filter(r => r.firstSaved >= fromTs && r.firstSaved < toTs); }
+  resavedFrom(fromTs, toTs) {
+    return [...new Map(this.store.resaves.filter(r => r.firstSaved >= fromTs && r.firstSaved < toTs).map(r => [r.id, r])).values()];
+  }
 }
 
 // ---------- resume after leaving TikTok ----------
@@ -208,5 +296,5 @@ function resumeDecision(store, kind, minutes) {
   return { pWarm: p, ask: p > 0.2 && p < 0.8, assume: p >= 0.8 ? "warm" : p <= 0.2 ? "cold" : null };
 }
 
-const api = { DAY, linkToId, isShortLink, postedTs, parseExport, parseDate, buildIndex, serializeIndex, loadIndex, Library, survivalOdds, learnSurvival, resumeDecision };
+const api = { DAY, civilDate, civilStart, civilClock, linkToId, isShortLink, postedTs, parseExport, parseDate, buildIndex, serializeIndex, loadIndex, Library, survivalOdds, learnSurvival, resumeDecision };
 if (typeof module !== "undefined") module.exports = api;

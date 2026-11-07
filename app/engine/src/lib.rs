@@ -8,7 +8,7 @@
 //! Coordinates are normalised 0..=65535 (0,0 = top-left). Swipe length `dy` uses the board's units:
 //! 1000 = the full screen height (default 400 = 40%). Positive dy = finger up = the grid scrolls down.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -59,12 +59,17 @@ pub struct MockDevice {
     pub sessions: u32,
     pub ok: bool,
     pub off_grid: bool,
+    pub connect_ms: u64,
+    pub activate_on_tap: Option<(u16, u16)>,
 }
 impl MockDevice {
     pub fn new() -> Self { Self { ok: true, ..Default::default() } }
 }
 impl Device for MockDevice {
-    async fn connect(&mut self) -> Result<(), String> { if self.ok { Ok(()) } else { Err("not connected".into()) } }
+    async fn connect(&mut self) -> Result<(), String> {
+        if self.connect_ms > 0 { tokio::time::sleep(Duration::from_millis(self.connect_ms)).await; }
+        if self.ok { Ok(()) } else { Err("not connected".into()) }
+    }
     async fn begin(&mut self) -> Result<(), String> { self.sessions += 1; Ok(()) }
     async fn end(&mut self) {}
     async fn drag(&mut self, x1: u16, y1: u16, x2: u16, y2: u16, steps: u32, delay_ms: u64) -> Result<(), String> {
@@ -72,7 +77,13 @@ impl Device for MockDevice {
         tokio::time::sleep(Duration::from_millis(steps as u64 * delay_ms / 20)).await;
         Ok(())
     }
-    async fn tap(&mut self, x: u16, y: u16) -> Result<(), String> { self.log.push(format!("tap {x} {y}")); Ok(()) }
+    async fn tap(&mut self, x: u16, y: u16) -> Result<(), String> {
+        self.log.push(format!("tap {x} {y}"));
+        if self.activate_on_tap == Some((x, y)) {
+            APP_ACTIVE_MS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(())
+    }
     async fn on_saved_grid(&mut self) -> bool { !self.off_grid }
     fn connected(&self) -> bool { self.ok }
 }
@@ -92,6 +103,7 @@ pub struct Status {
     pub check_end_ms: u64,
     pub check_failed: bool,
     pub run_id: u64,
+    pub motion_ms: u64,
 }
 
 pub struct Engine<D: Device> {
@@ -100,11 +112,14 @@ pub struct Engine<D: Device> {
     pub token: String,
     pub check_macro: RefCell<String>,
     /// Alternate rows used to corroborate a landing.
-    alternate_checks: RefCell<[String; 2]>,
+    alternate_checks: RefCell<[String; 8]>,
     pub auto_check: RefCell<bool>,
     started: Instant,
     stop: Rc<RefCell<bool>>,
     task: RefCell<Option<tokio::task::JoinHandle<()>>>,
+    motion_gate: tokio::sync::Mutex<()>,
+    stop_gate: tokio::sync::Mutex<()>,
+    cancel_generation: Cell<u64>,
     pub swipe_x: u16,
     pub swipe_y: u16,
 }
@@ -138,6 +153,9 @@ impl<D: Device + 'static> Engine<D> {
             started: Instant::now(),
             stop: Rc::new(RefCell::new(false)),
             task: RefCell::new(None),
+            motion_gate: tokio::sync::Mutex::new(()),
+            stop_gate: tokio::sync::Mutex::new(()),
+            cancel_generation: Cell::new(0),
             swipe_x: (FULL / 2) as u16,
             swipe_y: (FULL * 72 / 100) as u16,
         })
@@ -151,6 +169,9 @@ impl<D: Device + 'static> Engine<D> {
             "preDone": s.pre_done, "pre": s.pre, "autoCheck": *self.auto_check.borrow(), "checkEndMs": s.check_end_ms,
             "hasCheckMacro": !self.check_macro.borrow().is_empty(), "error": s.last_error,
             "runId": s.run_id, "checkFailed": s.check_failed,
+            "motionMs": s.motion_ms,
+            "verifiedDives": true,
+            "probeSlots": 1 + self.alternate_checks.borrow().iter().filter(|check| !check.is_empty()).count(),
         })
     }
 
@@ -165,21 +186,33 @@ impl<D: Device + 'static> Engine<D> {
 
     async fn dive(self: &Rc<Self>, n: u32, iv: u64, dy: i64, dur: u64, pn: u32, piv: u64, pdy: i64, check: String, verify: bool) -> serde_json::Value {
         // Finish with any running dive first: it holds the device while mid-swipe.
+        let generation = self.cancel_generation.get();
         let checking = self.status.lock().unwrap().checking;
-        if !checking { self.stop_now().await; }
-        let running = self.task.borrow_mut().take();
-        if let Some(h) = running {                                // let a running check finish its last tap
-            let _ = tokio::time::timeout(Duration::from_secs(4), h).await;
+        if !checking && self.stop_and_join().await["stopped"] != true {
+            return serde_json::json!({"ok": false, "error": "previous movement is still stopping"});
         }
+        let running = self.task.borrow_mut().take();
+        if let Some(mut h) = running { // let a running check finish its last tap
+            if tokio::time::timeout(Duration::from_secs(4), &mut h).await.is_err() {
+                self.task.borrow_mut().replace(h);
+                return serde_json::json!({"ok": false, "error": "previous landing check is still finishing"});
+            }
+        }
+        if generation != self.cancel_generation.get() {
+            return serde_json::json!({"ok": false, "error": "start cancelled"});
+        }
+        *self.stop.borrow_mut() = false;
         if let Err(e) = self.dev.borrow_mut().connect().await {
             self.set(|s| { s.connected = false; s.last_error = e.clone(); });
             return serde_json::json!({"ok": false, "error": format!("iPhone services not reachable: {e}")});
         }
+        if *self.stop.borrow() {
+            return serde_json::json!({"ok": false, "error": "start cancelled"});
+        }
         self.set(|s| s.connected = true);
-        *self.stop.borrow_mut() = false;
         self.set(|s| {
             s.busy = true; s.done = 0; s.planned = n; s.pre_done = 0; s.pre = pn;
-            s.last_error.clear(); s.check_failed = false; s.check_end_ms = 0; s.run_id += 1;
+            s.last_error.clear(); s.check_failed = false; s.check_end_ms = 0; s.run_id += 1; s.motion_ms = 0;
         });
         let run_id = self.status.lock().unwrap().run_id;
         let me = self.clone();
@@ -217,6 +250,7 @@ impl<D: Device + 'static> Engine<D> {
             Self::sleep_or_stop(&stop, piv.saturating_sub(t0.elapsed().as_millis() as u64)).await;
         }
         if pn > 0 { Self::sleep_or_stop(&stop, 1500).await; }
+        let motion_started = Instant::now();
         for i in 0..n {
             if *stop.borrow() || in_front() { break; }
             let t0 = Instant::now();
@@ -228,6 +262,7 @@ impl<D: Device + 'static> Engine<D> {
             self.set(|s| s.done = i + 1);
             Self::sleep_or_stop(&stop, iv.saturating_sub(t0.elapsed().as_millis() as u64)).await;
         }
+        self.set(|s| s.motion_ms = motion_started.elapsed().as_millis() as u64);
         let run_check = !*stop.borrow() && !in_front() && *self.auto_check.borrow() && !check.is_empty() &&
             self.status.lock().unwrap().last_error.is_empty();
         if run_check {
@@ -241,10 +276,21 @@ impl<D: Device + 'static> Engine<D> {
     }
 
     pub async fn stop_now(&self) -> serde_json::Value {
+        self.cancel_generation.set(self.cancel_generation.get().wrapping_add(1));
+        self.stop_and_join().await
+    }
+
+    async fn stop_and_join(&self) -> serde_json::Value {
         *self.stop.borrow_mut() = true;
+        let Ok(_gate) = self.stop_gate.try_lock() else {
+            return serde_json::json!({"ok": true, "stopped": false});
+        };
         let h = self.task.borrow_mut().take();
-        if let Some(h) = h {
-            let _ = tokio::time::timeout(Duration::from_secs(3), h).await;
+        if let Some(mut h) = h {
+            if tokio::time::timeout(Duration::from_secs(3), &mut h).await.is_err() {
+                self.task.borrow_mut().replace(h);
+                return serde_json::json!({"ok": true, "stopped": false});
+            }
         }
         self.set(|s| { s.busy = false; s.checking = false; });
         serde_json::json!({"ok": true, "stopped": true})
@@ -318,9 +364,12 @@ impl<D: Device + 'static> Engine<D> {
             "/status" => (200, self.status_json()),
             "/dive" if busy && num("idle", 0) == 1 => (200, serde_json::json!({"ok": false, "error": "busy"})),
             "/dive" => (200, {
+                let Ok(_gate) = self.motion_gate.try_lock() else {
+                    return (200, serde_json::json!({"ok": false, "error": "busy"}));
+                };
                 let check = if num("check", 1) == 0 { String::new() } else {
                     match num("row", 0) {
-                        r @ 1..=2 => self.alternate_checks.borrow()[(r - 1) as usize].clone(),
+                        r @ 1..=8 => self.alternate_checks.borrow()[(r - 1) as usize].clone(),
                         _ => self.check_macro.borrow().clone(),
                     }
                 };
@@ -330,6 +379,9 @@ impl<D: Device + 'static> Engine<D> {
             "/stop" => (200, self.stop_now().await),
             "/swipe" => {
                 if busy { return (200, serde_json::json!({"ok": false, "error": "busy: stop the dive first"})); }
+                let Ok(_gate) = self.motion_gate.try_lock() else {
+                    return (200, serde_json::json!({"ok": false, "error": "busy"}));
+                };
                 if let Err(e) = self.dev.borrow_mut().connect().await { return (200, serde_json::json!({"ok": false, "error": e})); }
                 let (x1, y1, x2, y2, s, d) = swipe_gesture(self.swipe_x, self.swipe_y, num("dy", 400), num("dur", 180).max(40) as u64);
                 let mut dev = self.dev.borrow_mut();
@@ -343,12 +395,15 @@ impl<D: Device + 'static> Engine<D> {
                     return (200, serde_json::json!({"ok": true, "saved": "check"}));
                 }
                 if let Some(row) = q.get("save").and_then(|v| v.strip_prefix("check")).and_then(|v| v.parse::<usize>().ok()) {
-                    if (1..=2).contains(&row) && !s.is_empty() {
+                    if (1..=8).contains(&row) && !s.is_empty() {
                         self.alternate_checks.borrow_mut()[row - 1] = s;
                         return (200, serde_json::json!({"ok": true}));
                     }
                 }
                 if busy { return (200, serde_json::json!({"ok": false, "error": "busy"})); }
+                let Ok(_gate) = self.motion_gate.try_lock() else {
+                    return (200, serde_json::json!({"ok": false, "error": "busy"}));
+                };
                 let m = if s.is_empty() { self.check_macro.borrow().clone() } else { s };
                 *self.stop.borrow_mut() = false;
                 if let Err(e) = self.dev.borrow_mut().connect().await { return (200, serde_json::json!({"ok": false, "error": e})); }
@@ -356,6 +411,20 @@ impl<D: Device + 'static> Engine<D> {
                 self.run_macro(&m).await;
                 self.dev.borrow_mut().end().await;
                 (200, serde_json::json!({"ok": true}))
+            }
+            "/checkmacros" => {
+                let rows: Option<Vec<String>> = (0..9)
+                    .map(|i| q.get(&format!("row{i}")).filter(|s| !s.is_empty()).cloned())
+                    .collect();
+                let Some(mut rows) = rows else {
+                    return (200, serde_json::json!({"ok": false, "error": "missing check probe"}));
+                };
+                let first = rows.remove(0);
+                let alternate: [String; 8] = rows.try_into().expect("validated nine probes");
+                *self.check_macro.borrow_mut() = first;
+                *self.alternate_checks.borrow_mut() = alternate;
+                *self.auto_check.borrow_mut() = num("on", 0) == 1;
+                (200, self.status_json())
             }
             "/autocheck" => { *self.auto_check.borrow_mut() = num("on", 0) != 0; (200, self.status_json()) }
             _ => (404, serde_json::json!({"ok": false, "error": "not found"})),
@@ -516,6 +585,75 @@ mod tests {
             let log = e.dev.borrow().log.clone();
             assert_eq!(log.iter().filter(|l| l.starts_with("drag")).count(), 2);
             assert_eq!(log.iter().filter(|l| l.starts_with("tap")).count(), 0, "no check after a nudge");
+        });
+    }
+
+    #[test]
+    fn guarded_dive_never_touches_an_unverified_screen() {
+        run(async {
+            let mut device = MockDevice::new();
+            device.off_grid = true;
+            let e = Engine::new(device, Some("tok".into()));
+            e.handle("/dive", &q(&[("n", "2"), ("guard", "1")]), "tok").await;
+            tokio::task::yield_now().await;
+            assert_eq!(e.status_json()["busy"], false);
+            assert_eq!(e.status_json()["done"], 0);
+            assert_eq!(e.status_json()["error"], "Open TikTok's Saved grid");
+            assert!(e.dev.borrow().log.is_empty());
+            assert_eq!(e.dev.borrow().sessions, 0);
+        });
+    }
+
+    #[test]
+    fn macro_grid_guard_skips_tile_and_share_taps() {
+        run(async {
+            let mut device = MockDevice::new();
+            device.off_grid = true;
+            let e = Engine::new(device, Some("tok".into()));
+            e.run_macro("G;T 100 200;T 300 400").await;
+            assert!(e.dev.borrow().log.is_empty());
+            assert_eq!(e.status_json()["error"], "Could not verify the Saved grid");
+        });
+    }
+
+    #[test]
+    fn stop_cancels_a_start_even_if_connect_is_still_pending() {
+        run(async {
+            let mut device = MockDevice::new();
+            device.connect_ms = 90;
+            let e = Engine::new(device, Some("tok".into()));
+            let first = e.clone();
+            let pending = tokio::task::spawn_local(async move {
+                first.handle("/dive", &q(&[("n", "2"), ("idle", "1")]), "tok").await.1
+            });
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let repeat = e.handle("/dive", &q(&[("n", "2"), ("idle", "1")]), "tok").await.1;
+            assert_eq!(repeat["error"], "busy");
+            e.stop_now().await;
+            assert_eq!(pending.await.unwrap()["error"], "start cancelled");
+            assert_eq!(e.dev.borrow().sessions, 0);
+            assert!(e.dev.borrow().log.is_empty());
+        });
+    }
+
+    #[test]
+    fn macro_returns_through_the_status_link_or_uses_the_window_as_fallback() {
+        run(async {
+            let mut device = MockDevice::new();
+            device.activate_on_tap = Some((101, 201));
+            let e = Engine::new(device, Some("tok".into()));
+            let macro_text = "R 101 201 301 401 501 601";
+            e.run_macro(macro_text).await;
+            assert_eq!(e.dev.borrow().log, ["tap 101 201"]);
+            assert_eq!(e.status_json()["checkFailed"], false);
+            {
+                let mut device = e.dev.borrow_mut();
+                device.log.clear();
+                device.activate_on_tap = Some((501, 601));
+            }
+            e.run_macro(macro_text).await;
+            assert_eq!(e.dev.borrow().log, ["tap 101 201", "tap 301 401", "tap 501 601"]);
+            assert_eq!(e.status_json()["checkFailed"], false);
         });
     }
 }

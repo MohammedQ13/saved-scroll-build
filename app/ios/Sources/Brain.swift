@@ -16,6 +16,7 @@ final class Brain {
     var exportsDir: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("Exports") }
 
     private func file(_ name: String) -> URL {
+        if name == "ss-priors.json" { return exportsDir.deletingLastPathComponent().appendingPathComponent(name) }
         let d = dataDir.appendingPathComponent(name)
         if FileManager.default.fileExists(atPath: d.path) { return d }
         let e = exportsDir.appendingPathComponent(name)
@@ -89,6 +90,7 @@ final class Brain {
         }
         let token: @convention(block) () -> String = { Engine.shared.token }
         let now: @convention(block) () -> Double = { Date().timeIntervalSince1970 * 1000 }
+        let timeZone: @convention(block) () -> String = { TimeZone.current.identifier }
         let logRun: @convention(block) (String) -> Void = { [unowned self] in self.appendRun($0) }
         native.setObject(unsafeBitCast(read, to: AnyObject.self), forKeyedSubscript: "read" as NSString)
         native.setObject(unsafeBitCast(write, to: AnyObject.self), forKeyedSubscript: "write" as NSString)
@@ -96,6 +98,7 @@ final class Brain {
         native.setObject(unsafeBitCast(http, to: AnyObject.self), forKeyedSubscript: "http" as NSString)
         native.setObject(unsafeBitCast(token, to: AnyObject.self), forKeyedSubscript: "token" as NSString)
         native.setObject(unsafeBitCast(now, to: AnyObject.self), forKeyedSubscript: "now" as NSString)
+        native.setObject(unsafeBitCast(timeZone, to: AnyObject.self), forKeyedSubscript: "timeZone" as NSString)
         native.setObject(unsafeBitCast(logRun, to: AnyObject.self), forKeyedSubscript: "logRun" as NSString)
         c.setObject(native, forKeyedSubscript: "native" as NSString)
         c.evaluateScript("var __mods = {};")

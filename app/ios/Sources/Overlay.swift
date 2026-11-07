@@ -209,10 +209,16 @@ final class Overlay: NSObject, ObservableObject, AVPictureInPictureSampleBufferP
             return Look(dot: pink, big: "CHECKING", small: "VERIFYING LANDING", progress: nil)
         }
         if wasBusy { wasBusy = false; lastDive = (done, planned, Date()) }
+        if Date().timeIntervalSince(Session.shared.verifiedAt) < 25 {
+            let observed = Session.shared.targetObserved
+            return Look(dot: observed ? .systemGreen : .systemOrange, big: observed ? "ARRIVED" : "NEAR TARGET",
+                        small: "LANDING CHECKED", progress: nil)
+        }
         if let d = lastDive, Date().timeIntervalSince(d.at) < 20, d.planned > 0, (st["error"] as? String ?? "").isEmpty {
             let finished = d.done >= d.planned
             let green = UIColor(red: 0.27, green: 0.93, blue: 0.56, alpha: 1)
-            return Look(dot: finished ? green : .systemOrange, big: "\(d.done)/\(d.planned)", small: finished ? "DONE" : "STOPPED",
+            let checking = finished && Session.shared.hasPending
+            return Look(dot: finished ? green : .systemOrange, big: "\(d.done)/\(d.planned)", small: checking ? "LEG COMPLETE" : finished ? "DONE" : "STOPPED",
                         progress: Double(d.done) / Double(d.planned))
         }
         if let e = st["error"] as? String, !e.isEmpty {

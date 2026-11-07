@@ -126,6 +126,9 @@ struct MenuIntent: AppIntent {
             } else if ask == "text" {
                 reply = try await $answer.requestValue(IntentDialog(stringLiteral: prompt))
             } else {
+                let start = (r["nativeStart"] as? Bool) == true
+                let advance = (r["nativeAdvance"] as? Bool) == true
+                if start || advance { await Session.shared.startAfterMenu(advance: advance) }
                 await Session.shared.refresh()
                 let text = Session.short(r["notify"] as? String)
                 return .result(dialog: IntentDialog(stringLiteral: text.isEmpty ? "Done." : text))

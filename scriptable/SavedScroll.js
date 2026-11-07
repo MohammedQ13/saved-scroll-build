@@ -26,12 +26,15 @@ async function main(input, env) {
   const cmd = typeof input === "string" ? safeJson(input) || { cmd: input } : input || {};
   const state = io.loadState();
   if (state.remote && /^phone/.test(state.remote.version || "")) state.remote.app = true;   // paired before the flag existed
-  const indexText = io.read("index.txt");
-  let lib = indexText ? new core.Library(core.loadIndex(indexText), state.lib) : null;
+  const indexText = env.loadIndex ? null : io.read("index.txt");
+  const index = env.loadIndex ? env.loadIndex() : indexText && core.loadIndex(indexText);
+  let lib = index ? new core.Library(index, state.lib) : null;
   const brain = state.brain || nav.newState();
   const v2 = env.navigatorV2;
   const out = r => { state.lib = lib ? lib.store : state.lib; state.brain = brain; io.saveState(state); return r; };
-  const fmtDate = ts => new Date(ts).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+  const timeZone = env.timeZone || "UTC";
+  const fmtDate = ts => new Date(ts).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone });
+  const startOf = (y, m, d) => core.civilStart(y, m, d, timeZone);
   const n = x => Number(x).toLocaleString("en-US");
 
   // SS Remote (optional ESP32 Bluetooth mouse, remote/firmware): when paired and reachable, dives go to it
@@ -51,7 +54,8 @@ async function main(input, env) {
     state.remote.autoCheck = !!(st.autoCheck && st.hasCheckMacro);
     const pl = state.pending.pl, iv = pl.interval || 1;
     const nSw = Math.max(1, Math.round(pl.seconds / iv)), preSec = pre * 0.7;
-    const res = await remote.dive({ n: nSw, iv: Math.round(iv * 1000), dy: (state.remote && state.remote.dy) || 400, dur: 180, pn: pre, piv: 700, pdy: -400 });
+    const res = await remote.dive({ n: nSw, iv: Math.round(iv * 1000), dy: (state.remote && state.remote.dy) || 400,
+      dur: 180, pn: pre, piv: 700, pdy: -400, ...(st.verifiedDives ? { guard: 1 } : {}) });
     if (!res || !res.ok) { if (state.remote.app) { state.pending = null; return appProblem(st, res); } return r; }
     state.pending.remote = { n: nSw, iv, pre, at: now };
     const eta = Math.round(pl.seconds + preSec + 3), mins = Math.max(1, Math.round(eta / 60));
@@ -81,7 +85,9 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     if (state.pending && state.pending.remote && st) state.pending.remote.stoppedAt = st.done;
     if (state.jumpV2) {
       recordV2("stop", state.jumpV2, { swipes: st?.done });
+      rearmV2(state.jumpV2);
       state.jumpV2 = null;
+      return out({ ok: !!res, text: "Paused. Press Play to locate your position and resume." });
     }
     return out({ ok: !!res, text: res ? `Stopped${st ? ` after ${st.done} of ${st.planned} swipes` : ""}. Copy link on a top video › button › Check where I landed, to see where you are.` : "Couldn't reach the Remote. Triple-click isn't needed: it stops by itself when its swipes are done." });
   }
@@ -91,7 +97,8 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     if (!st && state.remote && state.remote.app) return out(appProblem(null));
     if (st) {
       if (st.busy) return out({ ok: false, text: "It's already scrolling. Stop it first: floating window ⏸, or button › ⏹ Stop." });
-      const res = await remote.dive({ n: 20, iv: 1000, dy: (state.remote && state.remote.dy) || 400, dur: 180, pn: 0, check: 0 });
+      const res = await remote.dive({ n: 20, iv: 1000, dy: (state.remote && state.remote.dy) || 400,
+        dur: 180, pn: 0, check: 0, ...(st.verifiedDives ? { guard: 1 } : {}) });
       if (res && res.ok) return out({ ok: true, remote: true, text: "Test dive: 20 swipes down Saved, one per second (~20 s). Don't touch the screen.\nStop any time: floating window ⏸, or button › ⏹ Stop." });
       return out({ ok: false, text: `The app didn't start scrolling: ${(res && res.error) || "no answer"}.\nCheck LocalDevVPN is connected and the Saved Scroll app is open in the background.` });
     }
@@ -103,7 +110,10 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     const armed = state.armed && now - state.armed.at < 15 * 60000 ? state.armed.label : null;
     const rs = await remoteStatus();
     if (rs && rs.ok && state.remote) state.remote.autoCheck = !!(rs.autoCheck && rs.hasCheckMacro);
-    return out({ ok: true, indexed: !!lib, pending: !!(state.pending || state.jumpV2), autoCheck: !!(rs?.autoCheck && rs?.hasCheckMacro), armed,
+    const landing = lib && state.lastLanding ? lib.byId.get(state.lastLanding.id) : null;
+    return out({ ok: true, indexed: !!lib, pending: !!(state.pending || state.jumpV2),
+      autoCheck: !!(rs?.autoCheck && rs?.hasCheckMacro && rs?.verifiedDives), armed,
+      lastLanding: landing ? fmtDate(landing.ts) : null,
       remote: state.remote && state.remote.paired ? { reachable: !!(rs && rs.ok), ble: !!(rs && rs.ble), app: !!state.remote.app,
         ready: !!(rs && rs.ok && (rs.ble || rs.kind === "phone")), busy: !!(rs && rs.busy), done: rs ? rs.done : 0, planned: rs ? rs.planned : 0 } : null,
       pins: lib ? lib.store.pins.slice(0, 8).map((p, i) => ({ i, label: `${p.note ? "“" + p.note + "” · " : ""}${p.saved ? "saved " + fmtDate(p.saved) : "recent save"} · pinned ${fmtDate(p.at)}` })) : [],
@@ -112,18 +122,23 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
   if (cmd.cmd === "calendar" && lib) {                  // years, months of a year, or days of a month, with save counts
     const y = +cmd.year, m = +cmd.month;
     if (!y) {
-      const first = new Date(lib.meta.oldest).getUTCFullYear(), last = new Date(lib.meta.newest).getUTCFullYear();
+      const [first] = core.civilDate(lib.meta.oldest, timeZone), [last] = core.civilDate(lib.meta.newest, timeZone);
       const years = [];
-      for (let k = last; k >= first; k--) { const c = lib.range(Date.UTC(k, 0, 1), Date.UTC(k + 1, 0, 1)).count; if (c) years.push({ year: k, count: c }); }
+      for (let k = last; k >= first; k--) { const c = lib.range(startOf(k, 1, 1), startOf(k + 1, 1, 1)).count; if (c) years.push({ year: k, count: c }); }
       return out({ ok: true, years });
+    }
+    if (cmd.day) {
+      const counts = Array(24).fill(0);
+      for (const { hour } of lib.savedTimes(y, m, +cmd.day, timeZone)) counts[hour]++;
+      return out({ ok: true, hours: counts.map((count, hour) => ({ hour, count })).filter(r => r.count) });
     }
     if (!m) {
       const months = [];
-      for (let k = 12; k >= 1; k--) { const c = lib.range(Date.UTC(y, k - 1, 1), Date.UTC(y, k, 1)).count; if (c) months.push({ month: k, count: c }); }
+      for (let k = 12; k >= 1; k--) { const c = lib.range(startOf(y, k, 1), startOf(y, k + 1, 1)).count; if (c) months.push({ month: k, count: c }); }
       return out({ ok: true, months });
     }
     const days = [], dim = new Date(Date.UTC(y, m, 0)).getUTCDate();
-    for (let d = dim; d >= 1; d--) { const c = lib.day(y, m, d).count; if (c) days.push({ day: d, count: c }); }
+    for (let d = dim; d >= 1; d--) { const c = lib.day(y, m, d, timeZone).count; if (c) days.push({ day: d, count: c }); }
     return out({ ok: true, days });
   }
 
@@ -132,20 +147,30 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     if (!file) return out({ ok: false, text: "No TikTok export found. Put user_data.json (or .txt) in iCloud Drive › Scriptable › SavedScroll." });
     const ix = core.buildIndex(io.read(file, true));
     if (!ix.saves.length) return out({ ok: false, text: "That file has no favourite videos. Is it the TikTok data export?" });
+    if (lib && ix.meta.newest < lib.meta.newest) {
+      const found = lib.rememberOlder(ix);
+      return out({ ok: true, total: lib.meta.total, historical: true, text: `Kept your newer index. Compared this older export and found ${n(found)} re-saves.` });
+    }
     let resaves = [];
     if (lib) ({ lib, resaves } = lib.reindex(ix)); else lib = new core.Library(ix, state.lib);
     io.write("index.txt", core.serializeIndex(ix));
     state.importedAt = now;
     state.armed = state.pending = state.jumpV2 = null;
+    state.gridCache = null;
     return out({ ok: true, total: ix.meta.total, text: `Imported ${n(ix.meta.total)} saves (${fmtDate(ix.meta.oldest)} – ${fmtDate(ix.meta.newest)}). ${resaves.length ? resaves.length + " re-saved videos detected. " : ""}${ix.meta.dupes ? ix.meta.dupes + " duplicates merged. " : ""}` });
   }
   if (!lib) return out({ ok: false, text: "Import your TikTok export first (tap the button › Import my TikTok export)." });
 
   const where = async link => {
     let id = core.linkToId(link);
-    if (!id && core.isShortLink(link)) id = core.linkToId(await resolveLink(link));
+    let resolveMs;
+    if (!id && core.isShortLink(link)) {
+      const start = Date.now();
+      id = core.linkToId(await resolveLink(link));
+      if (id) resolveMs = Date.now() - start;
+    }
     if (!id) return null;
-    return lib.whereAmI(id, now);
+    return { ...lib.whereAmI(id, now), resolveMs };
   };
   const describe = w => {
     if (!w.inIndex) return `Not in your last export (${w.note}).`;
@@ -158,26 +183,53 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     if (env.logRun) env.logRun({ version: 2, event, at: now, run: jump.run, target: jump.target, leg: jump.legs, ...detail });
   }
 
+  function rearmV2(jump) {
+    if (!state.armed && jump.goal) state.armed = { ...jump.goal, at: now };
+  }
+
   function failV2(jump, text, error) {
-    recordV2("failed", jump, { error, text });
+    recordV2("failed", jump, { error });
+    rearmV2(jump);
     state.jumpV2 = null;
     return out({ ok: false, text });
+  }
+
+  function targetMatches(jump, save) {
+    if (!save) return false;
+    if (!jump.period) return lib.meta.total - save.bottom + 1 === jump.target;
+    const { start, end, hour, minute, zone } = jump.period;
+    if (save.ts < start || save.ts >= end) return false;
+    if (hour == null) return true;
+    const [h, m] = core.civilClock(save.ts, zone);
+    return h === hour && (minute == null || minute === m);
+  }
+
+  function finishLanding(jump, error, observed, match) {
+    const checkpoint = match || observed[0];
+    if (checkpoint) state.lastLanding = { id: checkpoint.id, at: now };
+    state.gridCache = { rank: jump.rank, frontier: jump.frontier, at: now };
+    state.jumpV2 = null;
+    recordV2("done", jump, { error, targetObserved: !!match });
+    return out({ ok: true, done: true, error, targetObserved: !!match,
+      text: match ? `Found ${jump.label}.` : `Near ${jump.label}. Checked the neighboring saves.` });
   }
 
   if (v2 && cmd.cmd === "advance") {
     const jump = state.jumpV2;
     if (!jump || !jump.action || jump.inFlight) return out({ ok: false, text: "No jump is ready to continue." });
     const st = await remoteReady();
-    if (!st || st.busy || st.checking || !st.autoCheck || !st.hasCheckMacro) {
+    if (!st || st.busy || st.checking || !st.autoCheck || !st.hasCheckMacro || !st.verifiedDives) {
       return failV2(jump, st?.busy || st?.checking ? "Saved Scroll is already moving." :
         "Turn on hands-free checks and make sure LocalDevVPN is connected.");
     }
     const action = jump.action;
-    const res = await remote.dive({ ...action, pn: 0, idle: 1, guard: 1 });
+    const { propensity, ...gesture } = action;
+    const res = await remote.dive({ ...gesture, pn: 0, idle: 1, guard: 1 });
     if (!res?.ok || !Number.isFinite(res.runId)) return failV2(jump, appProblem(st, res).text);
-    jump.inFlight = { id: res.runId, at: now, ...action };
+    jump.inFlight = { id: res.runId, at: now, ...action, motionRun: action.n ? res.runId : jump.motionRun };
+    if (action.n) jump.motionRun = res.runId;
     jump.action = null;
-    recordV2("leg", jump, { engineRun: res.runId, from: jump.rank, action, context: jump.context });
+    recordV2("leg", jump, { engineRun: res.runId, from: jump.rank, action: gesture, propensity, context: jump.context });
     return out({ ok: true, remote: true, text: action.n ? `${jump.label}\nScrolling · about ${Math.round(action.n * action.iv / 1000)} s to the next check.` :
       "Checking your position in Saved…" });
   }
@@ -193,22 +245,45 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
       return failV2(jump, "The scroll was interrupted. Return to Saved and start again.");
     }
     const w = await where(cmd.link);
+    if (flight.n) {
+      jump.motionMs = st.motionMs;
+      jump.completedMotion = st.done;
+    }
     const rank = w?.inIndex ? lib.meta.total - w.bottom + 1 : null;
+    if (jump.certify) {
+      const { error, anchors, remaining } = jump.certify;
+      const observed = anchors.map(r => lib.saves[r - 1]).filter(Boolean);
+      const match = rank != null && Math.abs(rank - jump.rank) <= 15 && targetMatches(jump, lib.saves[rank - 1])
+        ? lib.saves[rank - 1] : null;
+      recordV2("verify-target", jump, { engineRun: flight.id, observed: rank, row: flight.row, verified: !!match });
+      jump.inFlight = null;
+      if (match || !remaining.length) return finishLanding(jump, error, observed, match);
+      jump.action = v2.check(remaining.shift());
+      return out({ ok: true, resume: true, text: "Checking the target's neighboring tile…" });
+    }
     const learned = state.learnedV2 || (state.learnedV2 = env.v2Prior?.() || {});
-    const result = v2.observe(jump, learned, rank, flight.row, { done: st.done });
+    const result = v2.observe(jump, learned, rank, flight.row, { done: jump.completedMotion });
     recordV2("check", jump, { engineRun: flight.id, observed: rank, from: jump.rank, row: flight.row,
-      swipes: st.done, elapsedMs: now - flight.at, error: result.error, sample: result.sample,
+      swipes: st.done, elapsedMs: now - flight.at, motionRun: flight.motionRun,
+      motionMs: result.sample ? jump.motionMs : undefined, error: result.error, sample: result.sample,
       verified: !!(result.located || result.done) });
     jump.inFlight = null;
     if (result.failed) return failV2(jump, result.failed, result.error);
     if (result.done) {
-      state.jumpV2 = null;
-      recordV2("done", jump, { error: result.error });
-      return out({ ok: true, done: true, error: result.error, text: `You're there: ${jump.label}.` });
+      const observed = result.anchors.map(rank => lib.saves[rank - 1]).filter(Boolean);
+      const match = observed.find(save => targetMatches(jump, save));
+      if (!match && jump.precision && st.probeSlots >= 9 && jump.target >= jump.rank - 1) {
+        const remaining = v2.verificationSlots(jump.target, jump.rank, result.probes);
+        jump.certify = { error: result.error, anchors: result.anchors, remaining };
+        jump.action = v2.check(remaining.shift());
+        return out({ ok: true, resume: true, text: "Verifying the target tile…" });
+      }
+      return finishLanding(jump, result.error, observed, match);
     }
-    jump.context = cmd.context || jump.context;
-    jump.action = result.action || v2.plan(jump, learned, jump.context, { explore: !!cmd.calibrate });
-    return out({ ok: true, resume: true, text: result.action ? "Checking another row…" :
+    jump.context = { ...jump.context, ...cmd.context };
+    if (w?.resolveMs > 0 && w.resolveMs < 5000) jump.context.rttMs = w.resolveMs;
+    jump.action = result.action || v2.plan(jump, learned, jump.context, { calibrate: !!cmd.calibrate });
+    return out({ ok: true, resume: true, text: result.action?.n ? "Checking the nearby saves…" : result.action ? "Checking another row…" :
       `${jump.label} · ${n(Math.abs(result.error))} saves to go.` });
   }
 
@@ -235,9 +310,9 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     state.session = state.session || {};
     if (cmd.kind === "tiktok-closed") state.session.closedAt = now;
     if (cmd.kind === "tiktok-opened" && state.session.closedAt) state.session.awayMin = (now - state.session.closedAt) / 60000;
-    if (cmd.kind === "tiktok-restarted") { nav.sessionReset(brain, "restarted"); state.knownEst = null; if (state.session.awayMin != null) core.learnSurvival(lib.store, "app", state.session.awayMin, false); }
+    if (cmd.kind === "tiktok-restarted") { nav.sessionReset(brain, "restarted"); state.knownEst = state.gridCache = null; if (state.session.awayMin != null) core.learnSurvival(lib.store, "app", state.session.awayMin, false); }
     if (cmd.kind === "grid-kept" && state.session.awayMin != null) core.learnSurvival(lib.store, "app", state.session.awayMin, true);
-    if (cmd.kind === "saved-a-video") { state.knownEst = null; nav.sessionReset(brain, "saved a video"); }   // Saved jumps to the top and reloads (user-tested)
+    if (cmd.kind === "saved-a-video") { state.knownEst = state.gridCache = null; nav.sessionReset(brain, "saved a video"); }   // Saved jumps to the top and reloads (user-tested)
     return out({ ok: true });
   }
 
@@ -256,22 +331,48 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
 
   if (cmd.cmd === "plan") {
     const t = String(cmd.target || "");
-    let targetSave = null, label = "", count = 0;
-    if (/^\d{4}-\d{2}(-\d{2})?$/.test(t)) {
+    let targetSave = null, label = "", count = 0, period = null;
+    if (/^\d{4}$/.test(t)) {
+      const year = +t, start = startOf(year, 1, 1), end = startOf(year + 1, 1, 1), r = lib.range(start, end);
+      period = { start, end };
+      targetSave = r.newest;
+      count = r.count;
+      label = `${year} (${n(count)} saves)`;
+    } else if (/^\d{4}-\d{2}-\d{2}T\d{2}(?::\d{2})?$/.test(t)) {
+      const [y, m, d, h, minute] = t.split(/[-T:]/).map(Number);
+      if (m < 1 || m > 12 || d < 1 || d > new Date(Date.UTC(y, m, 0)).getUTCDate() ||
+          h >= 24 || (minute != null && minute >= 60)) return out({ ok: false, text: "Choose a valid date and time." });
+      const matches = lib.savedTimes(y, m, d, timeZone).filter(v => v.hour === h && (minute == null || v.minute === minute));
+      if (!matches.length) return out({ ok: false, text: "There are no indexed saves at that time." });
+      targetSave = matches[0].save;
+      count = matches.length;
+      period = { start: startOf(y, m, d), end: startOf(y, m, d + 1), hour: h, minute, zone: timeZone };
+      label = `${fmtDate(targetSave.ts)} at ${String(h).padStart(2, "0")}:${String(minute ?? 0).padStart(2, "0")} (${n(count)} saves)`;
+    } else if (/^\d{4}-\d{2}(-\d{2})?$/.test(t)) {
       const [y, m, d] = t.split("-").map(Number);
+      if (m < 1 || m > 12 || (d != null && (d < 1 || d > new Date(Date.UTC(y, m, 0)).getUTCDate()))) {
+        return out({ ok: false, text: "Choose a valid calendar date." });
+      }
       if (d) {
-        const day = lib.day(y, m, d);
-        targetSave = day.count ? day.newest : (day.newer || day.older);
+        const day = lib.day(y, m, d, timeZone);
+        targetSave = day.count ? day.newest : lib.nearestToRange(day.start, day.end);
         count = day.count;
+        if (count) period = { start: day.start, end: day.end };
         label = day.count ? `${fmtDate(day.start)} (${n(day.count)} saves)` : `nearest saves to ${fmtDate(day.start)}`;
-        const re = lib.resavedFrom(day.start, day.start + DAY).length;
+        const re = lib.resavedFrom(day.start, day.end).length;
         if (re) label += ` · ${re} re-saved since, now near the top`;
       } else {
-        const start = Date.UTC(y, m - 1, 1), end = Date.UTC(y, m, 1), r = lib.range(start, end);
+        const start = startOf(y, m, 1), end = startOf(y, m + 1, 1), r = lib.range(start, end);
         count = r.count;
-        targetSave = r.count ? r.newest : lib.day(y, m, 1).older; label = `${new Date(start).toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" })} (${n(r.count)} saves)`;
+        if (count) period = { start, end };
+        targetSave = r.count ? r.newest : lib.nearestToRange(start, end);
+        const monthLabel = new Date(start).toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone });
+        label = r.count ? `${monthLabel} (${n(r.count)} saves)` : `nearest saves to ${monthLabel}`;
       }
-    } else if (/tiktok\.com|^\d{18,21}$/.test(t)) {          // a copied video link (e.g. from Watch history)
+    } else if (t === "last-landing") {
+      targetSave = state.lastLanding && lib.byId.get(state.lastLanding.id);
+      if (targetSave) label = `last landing (saved ${fmtDate(targetSave.ts)})`;
+    } else if (/tiktokv?\.com|^\d{18,21}$/.test(t)) {         // a copied video link (e.g. from Watch history)
       const w = await where(t);
       if (!w || !w.inIndex) return out({ ok: false, text: "That video isn't in your last export, so it's near the top of Saved: just scroll." });
       targetSave = lib.byId.get(w.id); label = `that video (saved ${fmtDate(w.saved)})`;
@@ -288,7 +389,8 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     const targetTop = lib.top(targetSave.bottom, now);
     if (state.remote && state.remote.app) {
       const rank = lib.meta.total - targetSave.bottom + 1;
-      state.armed = { targetTop, rank: count && v2 ? v2.dateAim(rank, count) : rank, label, net: cmd.net || "wifi-good", at: now };
+      state.armed = { targetTop, rank: count && v2 && !t.includes("T") ? v2.dateAim(rank, count) : rank,
+        label, period, net: cmd.net || "wifi-good", at: now };
       return out({ ok: true, armed: true, text: label });
     }
     // A remembered position goes stale fast: people scroll and reopen Saved at the top (device 2026-11-06: a
@@ -347,18 +449,24 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     if (v2 && cmd.auto && a.rank) {
       const st = await remoteReady();
       if (!st || st.busy || st.checking) return out(appProblem(st));
-      if (!st.autoCheck || !st.hasCheckMacro) return out({ ok: false, text: "Turn on hands-free checks or choose a manual start." });
-      const jump = v2.create(a.rank, lib.meta.total);
-      Object.assign(jump, { label: a.label, run: now, context: cmd.context || {}, action: v2.check() });
+      if (!st.autoCheck || !st.hasCheckMacro || !st.verifiedDives) return out({ ok: false, text: "Hands-free checks aren't ready. Choose a manual start or check Settings." });
+      const cache = state.gridCache && now >= state.gridCache.at && now - state.gridCache.at < 120000 ? state.gridCache : null;
+      const prior = env.v2Prior?.();
+      if (prior && prior.trainedThrough > (state.learnedV2?.trainedThrough || 0)) state.learnedV2 = prior;
+      const precision = !a.period || a.period.end - a.period.start <= 26 * 3600000;
+      const jump = v2.create(a.rank, lib.meta.total, { cache, leading: precision });
+      Object.assign(jump, { label: a.label, period: a.period, precision, goal: a, run: now, context: cmd.context || {}, action: v2.check() });
       state.jumpV2 = jump;
       state.armed = state.pending = null;
       return out({ ok: true, resume: true, text: "Checking your position in Saved…" });
     }
     state.jumpV2 = null;
     let from = 1, pre = 0;
+    if (cmd.fromClip && !cmd.clip) return out({ ok: false, text: "Copy the link of an indexed save, or use automatic Go." });
     if (!cmd.top && !cmd.viaTop && cmd.clip && (cmd.fromClip || cmd.clip !== a.clip)) {
       const w = await where(cmd.clip);
       if (w && w.inIndex) { from = w.top; state.knownEst = { top: from, at: now }; }
+      else if (cmd.fromClip) return out({ ok: false, text: "That copied video is outside the current export. Use automatic Go or copy an indexed save." });
     }
     if (cmd.viaTop) {                                 // the Remote scrolls back up to the top first (loaded grid: fast)
       const loaded = brain.frontier && brain.frontier.pos ? brain.frontier.pos : 0;
@@ -404,7 +512,8 @@ That reading doesn't fit the plan (maybe a video you re-saved recently). Copy th
         const r10 = nav.RECIPES.find(r => r.id === DEFAULT_RECIPE);
         const per = Math.max(10, Math.exp(nav.warmLogPerStroke(brain, r10)));
         const nUp = Math.max(1, Math.round(-remaining / per));
-        const res = await remote.dive({ n: nUp, iv: 1000, dy: -((state.remote && state.remote.dy) || 400), dur: 180, pn: 0 });
+        const res = await remote.dive({ n: nUp, iv: 1000, dy: -((state.remote && state.remote.dy) || 400),
+          dur: 180, pn: 0, ...(st.verifiedDives ? { guard: 1 } : {}) });
         if (res && res.ok) {
           Object.assign(p, { legs: p.legs + 1, backing: true, remote: { n: nUp, iv: 1, pre: 0, at: now } });
           return out({ ok: true, remote: true, text: `${describe(w)}\n🤖 That's ${n(-remaining)} past it: the Remote is scrolling back up (${nUp} swipes, ~${nUp + 3} s). Then: Copy link › button › Check where I landed.`,
@@ -484,7 +593,8 @@ async function ui(input, env) {
       const n = i === r.batches - 1 ? r.lastBatch : r.batchTaps;
       reminders.push({ inSec: Math.round(8 + i * r.batchTaps * r.runSec + 4 * (i - 1)), text: `Tap the screen ${n} more times (batch ${i + 1} of ${r.batches}). Skip it to stop the dive.` });
     }
-    return { ask: dive ? "dive" : "none", done: true, ok: r.ok !== false, dive, runs: r.runs || 0, nudges: r.nudges || 0, notify: r.text || "", reminders };
+    return { ask: dive ? "dive" : "none", done: true, ok: r.ok !== false, dive, runs: r.runs || 0, nudges: r.nudges || 0,
+      notify: r.text || "", reminders, nativeStart: r.nativeStart, nativeAdvance: r.resume };
   };
 
   async function screen(name, ctx = {}) {
@@ -502,7 +612,7 @@ async function ui(input, env) {
       }
       const o = [];
       if (info.remote && info.remote.busy) o.push({ label: `⏹ Stop the Remote (${info.remote.done}/${info.remote.planned} swipes)`, cmd: { cmd: "remote-stop" } });
-      if (info.armed) o.push({ label: `▶️ Start: ${info.armed.split("\n")[0]}`, cmd: { cmd: "start" } });
+      if (info.armed) o.push({ label: `▶️ Start: ${info.armed.split("\n")[0]}`, cmd: { cmd: "start", auto: info.remote?.app && info.autoCheck } });
       if (info.pending) o.push({ label: "✅ Check where I landed (copied link)", cmd: { cmd: "arrived", link: clip } });
       o.push({ label: "🗓 Go to a month…", go: "years", ctx: { mode: "month" } });
       o.push({ label: "📅 Go to a day…", go: "years", ctx: { mode: "day" } });
@@ -574,10 +684,14 @@ async function ui(input, env) {
       if (c.cmd === "plan" || c.cmd === "start") c.clip = clip;
       if ((c.cmd === "arrived" || c.cmd === "pin" || c.cmd === "where") && !clipIsVideo) return finish({ ok: false, text: "First copy a video's link in TikTok (Share › Copy link), then tap the button again." });
       if (c.cmd === "start" && c.top) delete c.clip;
+      if (c.cmd === "start" && c.auto && env.navigatorV2) return finish({ ok: true, nativeStart: true, text: "Finding your position in Saved." });
       const r = await run(c);
       if (r.armed) {                              // position unknown: ask now instead of ending the menu
         const o = [], info = await run({ cmd: "menu-info" });
-        if (info.remote && info.remote.ready && !info.remote.busy) o.push({ label: `🤖 Start from wherever I am (${info.remote.app ? "Saved Scroll" : "the Remote"} goes up to the top first)`, cmd: { cmd: "start", viaTop: true } });
+        if (info.remote && info.remote.ready && !info.remote.busy) {
+          if (info.remote.app && info.autoCheck) o.push({ label: "▶️ Start from wherever I am", cmd: { cmd: "start", auto: true } });
+          else o.push({ label: "🤖 Start from wherever I am (go up first)", cmd: { cmd: "start", viaTop: true } });
+        }
         if (clipFresh && !(c.cmd === "plan" && c.target === clip)) o.push({ label: "▶️ Start from the video I just copied", cmd: { cmd: "start", fromClip: true } });
         o.push({ label: "▶️ Start: Saved is at the very top", cmd: { cmd: "start", top: true } });
         o.push({ label: "📋 I'm further down: I'll copy a video link first", say: r.text });

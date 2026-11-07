@@ -9,13 +9,24 @@
 // Swift calls SSBridge.run(cmdJson) and gets a Promise of the JSON result.
 var SSBridge = (function () {
   var ENGINE = "http://127.0.0.1:8787";
+  var cachedIndex;
+  var zone, deviceZone;
 
   function safeJson(s) { try { return JSON.parse(s); } catch (e) { return null; } }
 
   function makeEnv() {
+    var nextZone = native.timeZone ? String(native.timeZone()) : "UTC";
+    if (nextZone !== deviceZone) {
+      deviceZone = nextZone;
+      try { zone = new Intl.DateTimeFormat("en-CA", { timeZone: nextZone }).resolvedOptions().timeZone; }
+      catch (e) { zone = "UTC"; }
+    }
     var store = {
       read: function (f) { var v = native.read(f); return v == null ? null : String(v); },
-      write: function (f, s) { native.write(f, String(s)); },
+      write: function (f, s) {
+        native.write(f, String(s));
+        if (f === "index.txt") cachedIndex = undefined;
+      },
       loadState: function () { return safeJson(native.read("state.json") || "{}") || {}; },
       saveState: function (s) { native.write("state.json", JSON.stringify(s)); },
       newestExport: function () { var n = native.newestExport(); return n ? String(n) : null; },
@@ -39,8 +50,21 @@ var SSBridge = (function () {
     async function resolveLink(url) {
       try { var r = await native.http("HEAD", url, "{}", 6); return (r && r.url) || url; } catch (e) { return url; }
     }
+    function loadIndex() {
+      if (cachedIndex) return cachedIndex;
+      var raw = store.read("index.txt");
+      if (!raw) return null;
+      var index = __mods.core.loadIndex(raw);
+      index.byId = new Map(index.saves.map(function (s) { return [s.id, s]; }));
+      cachedIndex = index;
+      return cachedIndex;
+    }
     return { core: __mods.core, nav: __mods.navigator, navigatorV2: __mods["navigator-v2"], store: store, remote: remote,
-      resolveLink: resolveLink, now: native.now(), logRun: native.logRun && function (r) { native.logRun(JSON.stringify(r)); } };
+      loadIndex: loadIndex, resolveLink: resolveLink, now: native.now(), timeZone: zone,
+      logRun: native.logRun && function (r) { native.logRun(JSON.stringify(r)); },
+      v2Prior: function () {
+        return __mods["navigator-v2"].readPrior(safeJson(native.read("ss-priors.json") || ""));
+      } };
   }
 
   async function run(cmdJson) {

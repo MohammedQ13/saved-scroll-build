@@ -1,18 +1,4 @@
 import Foundation
-import Vision
-
-/// Called on the Rust engine thread with an in-memory developer-service frame.
-/// The search label is visible on the observed Saved grid even after scrolling.
-@_cdecl("ss_is_saved_grid")
-func ssIsSavedGrid(_ bytes: UnsafePointer<UInt8>, _ count: Int) -> Int32 {
-    let request = VNRecognizeTextRequest()
-    request.recognitionLevel = .fast
-    request.regionOfInterest = CGRect(x: 0, y: 0.66, width: 1, height: 0.24)
-    let handler = VNImageRequestHandler(data: Data(bytes: bytes, count: count), options: [:])
-    do { try handler.perform([request]) } catch { return 0 }
-    let text = request.results?.compactMap { $0.topCandidates(1).first?.string.lowercased() }.joined(separator: " ") ?? ""
-    return text.contains("search saved posts") ? 1 : 0
-}
 
 /// Swift face of the Rust engine. The engine serves the SS Remote API on 127.0.0.1:8787 for the
 /// Saved Scroll brain (Scriptable), and does the touching.
@@ -47,11 +33,15 @@ final class Engine: ObservableObject {
     /// OP-56). Breaks if the floating window was dragged away from the top centre.
     static let checkMacro = checkMacroFor(row: 0)
 
-    /// `row` 1 = the next row down (a grid row is ~530 px): the brain's "check one row lower" after an odd reading.
+    /// The first three probes are the initial localization sequence. Later
+    /// probes can certify a sparse date by reading a specific visible tile.
     static func checkMacroFor(row: Int) -> String {
         func p(_ x: Double, _ y: Double) -> String { "\(Int(x * 65535 / 1206)) \(Int(y * 65535 / 2622))" }
+        let tile = [0, 3, 2, 1, 4, 5, 6, 7, 8][row]
+        let tileX = 200 + Double(tile % 3) * 400
+        let tileY = 950 + Double(tile / 3) * 530
         return ["W 1500", "G",                             // settle and verify before opening a tile
-                "T \(p(200, 950 + Double(row) * 530))", "W 1800",   // top-row video (or the row below)
+                "T \(p(tileX, tileY))", "W 1800",
                 "T \(p(1113, 2057))", "W 1200",            // Share
                 "T \(p(327, 2168))", "W 900",              // Copy link
                 "D \(p(2, 2250)) \(p(850, 2250)) 300", "W 1200",   // back to the grid: left-edge swipe low, over the
@@ -67,15 +57,15 @@ final class Engine: ObservableObject {
 
     /// Hands the check macro to the engine (it runs it after each dive while auto-check is on).
     func installAutoCheck() async {
-        for row in 0...2 {
-            for _ in 0..<5 {
-                let r = await api("/macro", ["s": Engine.checkMacroFor(row: row), "save": row == 0 ? "check" : "check\(row)"])
-                if (r["ok"] as? Bool) == true { break }
-                try? await Task.sleep(nanoseconds: 500_000_000)
-            }
+        var params = Dictionary(uniqueKeysWithValues: (0...8).map { ("row\($0)", Engine.checkMacroFor(row: $0)) })
+        params["on"] = autoCheckOn ? "1" : "0"
+        var result: [String: Any] = [:]
+        for _ in 0..<5 {
+            result = await api("/checkmacros", params)
+            if (result["ok"] as? Bool) == true { break }
+            try? await Task.sleep(nanoseconds: 500_000_000)
         }
-        let r = await api("/autocheck", ["on": autoCheckOn ? "1" : "0"])
-        ssLog.notice("auto-check installed: on=\(autoCheckOn) engine=\(r["autoCheck"] ?? "?") macro=\(r["hasCheckMacro"] ?? "?")")
+        ssLog.notice("auto-check installed: on=\(autoCheckOn) engine=\(result["autoCheck"] ?? "?") probes=\(result["probeSlots"] ?? "?")")
     }
 
     /// Direct engine calls for the floating window's quick actions (no brain involved).
@@ -92,7 +82,8 @@ final class Engine: ObservableObject {
 
     /// A few swipes down (positive) or up (negative): fine-tuning from the floating window's skip buttons.
     func nudge(_ swipes: Int) async {
-        await api("/dive", ["n": String(abs(swipes)), "iv": "700", "dy": swipes > 0 ? "400" : "-400", "dur": "180", "pn": "0", "check": "0"])
+        await api("/dive", ["n": String(abs(swipes)), "iv": "700", "dy": swipes > 0 ? "400" : "-400",
+                            "dur": "180", "pn": "0", "check": "0", "idle": "1", "guard": "1"])
     }
 
     private func call(_ f: () -> UnsafeMutablePointer<CChar>?) -> [String: Any] {

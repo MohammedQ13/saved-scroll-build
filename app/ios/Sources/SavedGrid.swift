@@ -79,19 +79,37 @@ private func gridAnchor(_ labels: [ScreenLabel]) -> CGFloat? {
 }
 
 private func shareAnchor(_ labels: [ScreenLabel]) -> CGFloat? {
-    // Likes, comments and saves form a regularly spaced rail. The Share icon
-    // sits below the saves count, at different heights for videos and photos.
-    let counts = labels.filter {
-        (0.89...0.96).contains($0.x) && $0.text.range(of: #"^\d[\d., ]*[kmb]?$"#, options: .regularExpression) != nil
-    }.map(\.y).sorted()
-    for index in counts.indices.dropLast(2) {
-        let first = counts[index], second = counts[index + 1], third = counts[index + 2]
-        let a = second - first, b = third - second
-        if (0.07...0.082).contains(a), abs(a - b) < 0.006, (0.47...0.59).contains(first) {
-            return third + 0.046
+    // Likes, comments, saves and shares form a regularly spaced rail. Allow
+    // one unread count, such as a single digit over a busy photo background.
+    let onRail = labels.filter { (0.89...0.96).contains($0.x) }
+    let counts = onRail.filter {
+        $0.text.range(of: #"^\d[\d., ]*[kmb]?$"#, options: .regularExpression) != nil
+    }.map(\.y)
+    let emptyComments = onRail.first { $0.text == "add 1st" }?.y
+    let rail: [CGFloat] = [0, 0.076, 0.152, 0.228]
+    if let emptyComments {
+        let start = emptyComments - rail[1]
+        if (0.50...0.61).contains(start) && counts.contains(where: { center in
+            [rail[0], rail[2], rail[3]].contains { abs(center - (start + $0)) < 0.010 }
+        }) {
+            return start + 0.198
         }
     }
-    return nil
+    var best: (score: CGFloat, start: CGFloat)?
+    for center in counts {
+        for offset in rail {
+            let start = center - offset
+            guard (0.50...0.61).contains(start) else { continue }
+            let errors = rail.compactMap { slot in counts.map { abs($0 - (start + slot)) }.min() }
+                .filter { $0 < 0.010 }
+            guard errors.count >= 3 else { continue }
+            let score = CGFloat(errors.count) - errors.reduce(0, +)
+            if score > (best?.score ?? 0) {
+                best = (score, start)
+            }
+        }
+    }
+    return best.map { $0.start + 0.198 }
 }
 
 private func copyAnchor(_ labels: [ScreenLabel]) -> CGFloat? {

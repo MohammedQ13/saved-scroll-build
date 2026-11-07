@@ -64,7 +64,8 @@ struct HomeView: View {
                     header
                     chips
                     windowCard
-                    if let armed = session.armed { armedCard(armed) } else { goCard }
+                    if let armed = session.armed { armedCard(armed) }
+                    goCard
                     if !session.message.isEmpty {
                         Text(session.message).font(Theme.mono(12)).foregroundStyle(Theme.dim).padding(.horizontal, 4)
                     }
@@ -160,7 +161,7 @@ struct HomeView: View {
     }
 
     private var goCard: some View {
-        Card(title: "Go to") {
+        Card(title: session.armed == nil ? "Go to" : "Change target") {
             if !session.indexed {
                 RowButton(icon: "square.and.arrow.down", title: "Import TikTok export", detail: "user_data_tiktok.json from Files") { importing = true }
                 RowButton(icon: "waveform.path", title: "Test dive", detail: "20 swipes. Leave TikTok on your Saved tab first.") { session.testDive() }
@@ -221,7 +222,11 @@ struct GoToSheet: View {
     @State private var month: Int?
     @State private var day: Int?
     @State private var loading = true
-    private let monthNames = Calendar(identifier: .gregorian).monthSymbols
+    private let monthNames: [String] = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = .current
+        return calendar.monthSymbols
+    }()
 
     var body: some View {
         NavigationStack {

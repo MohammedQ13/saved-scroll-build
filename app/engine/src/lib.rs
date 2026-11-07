@@ -48,7 +48,7 @@ pub trait Device {
     async fn end(&mut self);
     async fn drag(&mut self, x1: u16, y1: u16, x2: u16, y2: u16, steps: u32, delay_ms: u64) -> Result<(), String>;
     async fn tap(&mut self, x: u16, y: u16) -> Result<(), String>;
-    async fn on_saved_grid(&mut self) -> bool { true }
+    async fn screen_anchor(&mut self, _kind: i32) -> Option<u16> { Some(1) }
     fn connected(&self) -> bool;
 }
 
@@ -59,6 +59,7 @@ pub struct MockDevice {
     pub sessions: u32,
     pub ok: bool,
     pub off_grid: bool,
+    pub missing_anchor: Option<i32>,
     pub connect_ms: u64,
     pub activate_on_tap: Option<(u16, u16)>,
 }
@@ -84,7 +85,9 @@ impl Device for MockDevice {
         }
         Ok(())
     }
-    async fn on_saved_grid(&mut self) -> bool { !self.off_grid }
+    async fn screen_anchor(&mut self, kind: i32) -> Option<u16> {
+        (!(kind == 0 && self.off_grid) && self.missing_anchor != Some(kind)).then_some(1)
+    }
     fn connected(&self) -> bool { self.ok }
 }
 
@@ -233,7 +236,7 @@ impl<D: Device + 'static> Engine<D> {
             self.set(|s| { s.busy = false; s.last_error = "Open TikTok's Saved grid".into(); });
             return;
         }
-        if verify && !self.dev.borrow_mut().on_saved_grid().await {
+        if verify && self.dev.borrow_mut().screen_anchor(0).await.is_none() {
             self.set(|s| { s.busy = false; s.last_error = "Open TikTok's Saved grid".into(); });
             return;
         }
@@ -298,13 +301,11 @@ impl<D: Device + 'static> Engine<D> {
 
     /// Steps separated by ';' with normalised coordinates. R tries the status-bar return link, then PiP.
     pub async fn run_macro(&self, steps: &str) {
-        let mut grid_failed = false;
         for st in steps.split(';').map(str::trim).filter(|s| !s.is_empty()) {
             if *self.stop.borrow() { break; }
             let mut it = st.split_whitespace();
             let op = it.next().unwrap_or("");
             if APP_IN_FRONT.load(std::sync::atomic::Ordering::Relaxed) { break; }
-            if grid_failed && op != "R" { continue; }
             let a: Vec<i64> = it.filter_map(|v| v.parse::<f64>().ok().map(|f| f as i64)).collect();
             let u = |i: usize| a.get(i).copied().unwrap_or(0).clamp(0, FULL) as u16;
             match op {
@@ -315,8 +316,29 @@ impl<D: Device + 'static> Engine<D> {
                 }
                 "W" => Self::sleep_or_stop(&self.stop, a.first().copied().unwrap_or(0).max(0) as u64).await,
                 "G" => {
-                    grid_failed = !self.dev.borrow_mut().on_saved_grid().await;
-                    if grid_failed { self.set(|s| s.last_error = "Could not verify the Saved grid".into()); }
+                    if self.dev.borrow_mut().screen_anchor(0).await.is_none() {
+                        self.set(|s| { s.check_failed = true; s.last_error = "Could not verify the Saved grid".into(); });
+                        break;
+                    }
+                }
+                // A verifies the screen and taps at the observed anchor plus a row offset.
+                "A" => {
+                    let kind = u(0) as i32;
+                    let anchor = self.dev.borrow_mut().screen_anchor(kind).await;
+                    if *self.stop.borrow() || APP_IN_FRONT.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                    let Some(y) = anchor.and_then(|y| y.checked_add(u(2))).filter(|&y| y < 59000) else {
+                        let error = match kind {
+                            0 => "Could not verify a visible Saved tile",
+                            1 => "Could not locate Share on the post",
+                            _ => "Could not locate Copy link in the share sheet",
+                        };
+                        self.set(|s| { s.check_failed = true; s.last_error = error.into(); });
+                        break;
+                    };
+                    if let Err(error) = self.dev.borrow_mut().tap(u(1), y).await {
+                        self.set(|s| { s.check_failed = true; s.last_error = error; });
+                        break;
+                    }
                 }
                 "R" => {
                     use std::sync::atomic::Ordering::Relaxed;
@@ -331,7 +353,7 @@ impl<D: Device + 'static> Engine<D> {
                             Self::sleep_or_stop(&self.stop, 750).await;
                         }
                     }
-                    self.set(|s| s.check_failed = grid_failed || APP_ACTIVE_MS.load(Relaxed) == before);
+                    self.set(|s| s.check_failed = APP_ACTIVE_MS.load(Relaxed) == before);
                 }
                 "S" => {
                     let (x1, y1, x2, y2, s, d) = swipe_gesture(self.swipe_x, self.swipe_y, a.first().copied().unwrap_or(400), a.get(1).copied().unwrap_or(180).max(30) as u64);
@@ -610,9 +632,21 @@ mod tests {
             let mut device = MockDevice::new();
             device.off_grid = true;
             let e = Engine::new(device, Some("tok".into()));
-            e.run_macro("G;T 100 200;T 300 400").await;
+            e.run_macro("G;T 100 200;R 101 201 301 401 501 601").await;
             assert!(e.dev.borrow().log.is_empty());
             assert_eq!(e.status_json()["error"], "Could not verify the Saved grid");
+        });
+    }
+
+    #[test]
+    fn macro_stops_before_copy_and_return_if_share_sheet_is_unverified() {
+        run(async {
+            let mut device = MockDevice::new();
+            device.missing_anchor = Some(2);
+            let e = Engine::new(device, Some("tok".into()));
+            e.run_macro("A 0 100 200;A 1 300 0;A 2 500 0;D 2 20 850 20 300;R 101 201 301 401 501 601").await;
+            assert_eq!(e.dev.borrow().log, ["tap 100 201", "tap 300 1"]);
+            assert_eq!(e.status_json()["checkFailed"], true);
         });
     }
 

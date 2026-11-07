@@ -236,9 +236,9 @@ impl Device for PhoneDevice {
     }
 
     #[cfg(target_os = "ios")]
-    async fn on_saved_grid(&mut self) -> bool {
+    async fn screen_anchor(&mut self, kind: i32) -> Option<u16> {
         use idevice::dvt::{remote_server::RemoteServerClient, screenshot::ScreenshotClient};
-        extern "C" { fn ss_is_saved_grid(data: *const u8, length: usize) -> i32; }
+        extern "C" { fn ss_screen_anchor(data: *const u8, length: usize, kind: i32) -> i32; }
         let snapshot = async {
             let adapter = self.adapter.as_mut().ok_or(idevice::IdeviceError::NotFound)?;
             let hs = self.handshake.as_mut().ok_or(idevice::IdeviceError::NotFound)?;
@@ -248,8 +248,8 @@ impl Device for PhoneDevice {
             client.take_screenshot().await
         };
         match tokio::time::timeout(std::time::Duration::from_secs(3), snapshot).await {
-            Ok(Ok(data)) => unsafe { ss_is_saved_grid(data.as_ptr(), data.len()) == 1 },
-            _ => false,
+            Ok(Ok(data)) => u16::try_from(unsafe { ss_screen_anchor(data.as_ptr(), data.len(), kind) }).ok().filter(|&y| y != 0),
+            _ => None,
         }
     }
 

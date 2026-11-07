@@ -152,6 +152,7 @@ final class Session: ObservableObject {
             let failed = (Engine.shared.status["checkFailed"] as? Bool) == true
             let error = Engine.shared.status["error"] as? String ?? ""
             if failed || !error.isEmpty {
+                ssLog.notice("engine check stopped: \(error.isEmpty ? "no return to app" : error)")
                 let r = await Brain.shared.run(["cmd": "check-failed"])
                 message = error.isEmpty ? Session.short(r["text"] as? String) : error
                 Session.notify("Saved Scroll", message)

@@ -209,7 +209,8 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     if (checkpoint) state.lastLanding = { id: checkpoint.id, at: now };
     state.gridCache = { rank: jump.rank, frontier: jump.frontier, at: now };
     state.jumpV2 = null;
-    recordV2("done", jump, { error, targetObserved: !!match });
+    recordV2("done", jump, { error, targetObserved: !!match,
+      matchedRank: match ? lib.meta.total - match.bottom + 1 : null, landingRank: jump.rank });
     return out({ ok: true, done: true, error, targetObserved: !!match,
       text: match ? `Found ${jump.label}.` : `Near ${jump.label}. Checked the neighboring saves.` });
   }

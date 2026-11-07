@@ -26,11 +26,9 @@ final class Engine: ObservableObject {
 
     var busy: Bool { (status["busy"] as? Bool) == true }
 
-    /// Hands-free landing check (D-41). After each leg the engine: opens a top-row video, Share, Copy link,
-    /// swipes back from the left edge to the grid, taps the floating window (controls) and its "back to app"
-    /// button. The app then reads the copied link (background apps can't: L-25) and starts the next leg
-    /// (Session.autoCheckIfDue). Positions measured on the user's phone 2026-11-06 (1206x2622 screen; OP-54,
-    /// OP-56). Breaks if the floating window was dragged away from the top centre.
+    /// Hands-free landing check (D-41). The engine locates the tile, Share and
+    /// Copy link from screen evidence, then verifies its return to Saved before
+    /// trying the status-bar return link and PiP fallback.
     static let checkMacro = checkMacroFor(row: 0)
 
     /// The first three probes are the initial localization sequence. Later
@@ -39,11 +37,11 @@ final class Engine: ObservableObject {
         func p(_ x: Double, _ y: Double) -> String { "\(Int(x * 65535 / 1206)) \(Int(y * 65535 / 2622))" }
         let tile = [0, 3, 2, 1, 4, 5, 6, 7, 8][row]
         let tileX = 200 + Double(tile % 3) * 400
-        let tileY = 950 + Double(tile / 3) * 530
-        return ["W 1500", "G",                             // settle and verify before opening a tile
-                "T \(p(tileX, tileY))", "W 1800",
-                "T \(p(1113, 2057))", "W 1200",            // Share
-                "T \(p(327, 2168))", "W 900",              // Copy link
+        let rowOffset = Double(tile / 3) * 530
+        return ["W 1500",
+                "A 0 \(p(tileX, rowOffset))", "W 1800",    // Saved tile
+                "A 1 \(p(1113, 0))", "W 1200",            // Share
+                "A 2 \(p(327, 0))", "W 900",               // Copy link
                 "D \(p(2, 2250)) \(p(850, 2250)) 300", "W 1200",   // back to the grid: left-edge swipe low, over the
                                                                    // caption (at mid-height it flips photo posts)
                 "G", "R \(p(145, 113)) \(p(600, 380)) \(p(1105, 250))"].joined(separator: ";")

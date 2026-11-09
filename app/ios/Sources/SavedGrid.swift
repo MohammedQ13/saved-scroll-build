@@ -1,4 +1,6 @@
 import Foundation
+import CoreGraphics
+import ImageIO
 import Vision
 
 /// Coordinates are in the engine's top-left 0...65535 space. Zero means there
@@ -35,7 +37,7 @@ func ssScreenAnchor(_ bytes: UnsafePointer<UInt8>, _ count: Int, _ kind: Int32) 
             }
             return [label(candidate.string, result.boundingBox)] + pieces
         }
-        let anchor = kind == 0 ? gridAnchor(labels) : kind == 1 ? shareAnchor(labels) : copyAnchor(labels)
+        let anchor = kind == 0 ? gridAnchor(labels) : kind == 1 ? shareAnchor(labels, image: data) : copyAnchor(labels)
         if let anchor, (0..<1).contains(anchor) { return Int32(anchor * 65535) }
     }
     #if os(iOS)
@@ -73,12 +75,15 @@ private func gridAnchor(_ labels: [ScreenLabel]) -> CGFloat? {
     // on the same line before treating the content below them as a tile.
     guard let posts = labels.first(where: { $0.x < 0.24 && (0.15...0.46).contains($0.y) && ($0.text == "posts" || $0.text.hasPrefix("posts ")) }),
           labels.contains(where: { (0.26...0.54).contains($0.x) && $0.text.hasPrefix("collections") && abs($0.y - posts.y) < 0.012 }),
-          labels.contains(where: { (0.55...0.76).contains($0.x) && $0.text.hasPrefix("sounds") && abs($0.y - posts.y) < 0.012 })
+          labels.contains(where: {
+              let rightEdge: CGFloat = $0.text.contains("effe") ? 0.82 : 0.76
+              return (0.55...rightEdge).contains($0.x) && $0.text.hasPrefix("sounds") && abs($0.y - posts.y) < 0.012
+          })
     else { return nil }
     return posts.y + 0.051
 }
 
-private func shareAnchor(_ labels: [ScreenLabel]) -> CGFloat? {
+private func shareAnchor(_ labels: [ScreenLabel], image: Data) -> CGFloat? {
     // Likes, comments, saves and shares form a regularly spaced rail. Allow
     // one unread count, such as a single digit over a busy photo background.
     let onRail = labels.filter { (0.89...0.96).contains($0.x) }
@@ -109,7 +114,36 @@ private func shareAnchor(_ labels: [ScreenLabel]) -> CGFloat? {
             }
         }
     }
-    return best.map { $0.start + 0.198 }
+    if let best { return best.start + 0.198 }
+    // A saved post has a yellow bookmark directly above its save count.
+    // Use that independent cue when white action counts blend into the post.
+    // The macro still verifies the Share sheet before any Copy link tap.
+    return counts.first { (0.652...0.762).contains($0) && hasSavedBookmark(image, above: $0) }
+        .map { $0 + 0.046 }
+}
+
+private func hasSavedBookmark(_ image: Data, above count: CGFloat) -> Bool {
+    let width = 150, height = 326
+    guard let source = CGImageSourceCreateWithData(image as CFData, nil),
+          let frame = CGImageSourceCreateImageAtIndex(source, 0, nil),
+          let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                                  bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    else { return false }
+    context.draw(frame, in: CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
+    guard let pixels = context.data?.assumingMemoryBound(to: UInt8.self) else { return false }
+    let center = Int(0.925 * CGFloat(width))
+    let first = Int((count - 0.048) * CGFloat(height))
+    let last = Int((count - 0.013) * CGFloat(height))
+    var matchingRows = 0
+    for y in first...last {
+        let yellow = ((center - 5)...(center + 5)).filter { x in
+            let i = (y * width + x) * 4
+            return pixels[i] >= 200 && pixels[i + 1] >= 165 && pixels[i + 2] <= 85
+        }
+        if (5...10).contains(yellow.count) && yellow.contains(center) { matchingRows += 1 }
+    }
+    return matchingRows >= 6
 }
 
 private func copyAnchor(_ labels: [ScreenLabel]) -> CGFloat? {

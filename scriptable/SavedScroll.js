@@ -361,7 +361,7 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
         if (count) period = { start: day.start, end: day.end };
         label = day.count ? `${fmtDate(day.start)} (${n(day.count)} saves)` : `nearest saves to ${fmtDate(day.start)}`;
         const re = lib.resavedFrom(day.start, day.end).length;
-        if (re) label += ` · ${re} re-saved since, now near the top`;
+        if (re) label += ` · ${re} re-saved since`;
       } else {
         const start = startOf(y, m, 1), end = startOf(y, m + 1, 1), r = lib.range(start, end);
         count = r.count;
@@ -375,7 +375,7 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
       if (targetSave) label = `last landing (saved ${fmtDate(targetSave.ts)})`;
     } else if (/tiktokv?\.com|^\d{18,21}$/.test(t)) {         // a copied video link (e.g. from Watch history)
       const w = await where(t);
-      if (!w || !w.inIndex) return out({ ok: false, text: "That video isn't in your last export, so it's near the top of Saved: just scroll." });
+      if (!w || !w.inIndex) return out({ ok: false, text: "That video isn't in your latest export. Its current save date and position are unknown." });
       targetSave = lib.byId.get(w.id); label = `that video (saved ${fmtDate(w.saved)})`;
     } else if (t === "pin" || t.startsWith("pin:")) {
       const p = lib.store.pins[t === "pin" ? 0 : +t.slice(4)];

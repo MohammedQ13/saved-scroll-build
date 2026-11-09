@@ -140,10 +140,10 @@ function resaveEvidence(older, newer) {
 }
 
 function mergeResaves(existing, observed) {
-  const unique = new Map(existing.map(r => [r.id + "/" + r.resavedAt, r]));
+  const key = r => r.id + "/" + r.firstSaved + "/" + r.resavedAt;
+  const unique = new Map(existing.map(r => [key(r), r]));
   for (const r of observed) {
-    const key = r.id + "/" + r.resavedAt;
-    if (!unique.has(key) || r.firstSaved < unique.get(key).firstSaved) unique.set(key, r);
+    unique.set(key(r), r);
   }
   return [...unique.values()];
 }
@@ -203,7 +203,7 @@ class Library {
     const posted = postedTs(id);
     if (!s) {
       const re = this.store.resaves.find(r => r.id === id);
-      return { id, inIndex: false, posted, note: re ? "re-saved after your last export: near the top" : "saved after your last export: near the top" };
+      return { id, inIndex: false, posted, note: re ? "older save history exists; current position unknown" : "not in the latest export; current save date unknown" };
     }
     const re = this.store.resaves.filter(r => r.id === id).sort((a, b) => a.firstSaved - b.firstSaved)[0];
     return { id, inIndex: true, bottom: s.bottom, top: this.top(s.bottom, now), total: this.totalNow(now), saved: s.ts, posted,
@@ -268,9 +268,22 @@ class Library {
     this.store.resaves = mergeResaves(this.store.resaves, evidence);
     return evidence.length;
   }
-  // Videos first saved inside a time range that have since been re-saved to the top.
+  // Videos previously observed in a time range that were saved again later.
   resavedFrom(fromTs, toTs) {
     return [...new Map(this.store.resaves.filter(r => r.firstSaved >= fromTs && r.firstSaved < toTs).map(r => [r.id, r])).values()];
+  }
+
+  observedSaveTimes(id) {
+    const times = new Set();
+    const current = this.byId.get(id);
+    if (current) times.add(current.ts);
+    for (const record of this.store.resaves) {
+      if (record.id === id) {
+        times.add(record.firstSaved);
+        times.add(record.resavedAt);
+      }
+    }
+    return [...times].sort((a, b) => a - b);
   }
 }
 

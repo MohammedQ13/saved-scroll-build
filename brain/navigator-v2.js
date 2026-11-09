@@ -133,7 +133,8 @@ function plan(jump, learned, context = {}, { rng = Math.random, explore = false,
   const tuning = jump.tuning || DEFAULT_TUNING;
   const fine = distance <= tuning.fineAt || (jump.stalled > 0 && distance <= 120);
   const direction = Math.sign(remaining);
-  const fit = learned[warm ? "warm" : "cold"] || model(warm);
+  const key = warm ? "warm" : "cold";
+  const fit = jump.provisionalFits?.[key] || learned[key] || model(warm);
   const session = warm ? jump.warmSession : jump.session;
   // Sub-row gestures are intentionally slow and spaced apart to avoid a fling.
   const eligible = !fine && !warm && distance > 700 && !context.lowPower && !(context.thermal >= 2);
@@ -186,7 +187,14 @@ function plan(jump, learned, context = {}, { rng = Math.random, explore = false,
 function observe(jump, learned, rank, row, { rng = Math.random, done } = {}) {
   const loc = localize(jump, rank, row, rng);
   if (!loc?.verified) {
-    if (row < 2) return { action: check(row + 1), reason: "confirm" };
+    if (jump.preferredInitialProbe && jump.rank == null && jump.legs === 0) {
+      if (jump.observations.length < 3) {
+        const next = [0, 1, 2].find(candidate => !jump.observations.some(read => read.row === candidate));
+        if (next != null) return { action: check(next), reason: "confirm" };
+      }
+    } else if (row < 2) {
+      return { action: check(row + 1), reason: "confirm" };
+    }
     if (jump.scouts < 4 && jump.legs < MAX_LEGS) {
       const anchor = jump.observations.find(a => Number.isFinite(a.rank));
       const nearEnd = anchor && anchor.rank > jump.total - 20;
@@ -194,13 +202,17 @@ function observe(jump, learned, rank, row, { rng = Math.random, done } = {}) {
         (jump.rank <= 130 && jump.prediction?.direction < 0 && jump.prediction.pos <= 16));
       const retreat = !nearTop && (nearEnd || jump.scouts === 3 || jump.rank != null);
       const coarseTop = nearTop && jump.scouts >= 2;
-      const n = nearTop ? (coarseTop ? 4 * (jump.scouts - 1) : jump.scouts + 1) :
+      const shortInitial = jump.tuning?.shortInitial && !jump.shortInitialTried &&
+        jump.rank == null && jump.target <= 35 && jump.scouts === 0;
+      const n = shortInitial ? 1 : nearTop ? (coarseTop ? 4 * (jump.scouts - 1) : jump.scouts + 1) :
         jump.rank == null && !retreat ? (jump.tuning || DEFAULT_TUNING).scout * (jump.scouts + 1) : 2;
-      jump.scouts++;
+      if (shortInitial) jump.shortInitialTried = true;
+      else jump.scouts++;
       jump.legs++;
       jump.observations = [];
       jump.prediction = null;
-      const action = nearTop && !coarseTop ? { ...BASE, dy: 140, dur: 480 } : { ...BASE, dy: retreat ? -240 : BASE.dy };
+      const action = shortInitial ? { ...BASE, dy: 240 } :
+        nearTop && !coarseTop ? { ...BASE, dy: 140, dur: 480 } : { ...BASE, dy: retreat ? -240 : BASE.dy };
       return { action: { ...action, n, row: 0 }, reason: "scout" };
     }
     return { failed: "Couldn't locate this spot from the visible saves. Open your Saved grid and try again." };
@@ -226,6 +238,7 @@ function observe(jump, learned, rank, row, { rng = Math.random, done } = {}) {
   if (cacheMiss) {
     jump.frontier = loc.rank;
     jump.retainedFrontier = false;
+    if (jump.provisionalFits) delete jump.provisionalFits.warm;
   }
   if (reset) {
     jump.frontier = loc.rank;
@@ -234,6 +247,7 @@ function observe(jump, learned, rank, row, { rng = Math.random, done } = {}) {
     jump.terminalEvidence = null;
     jump.recentMotion = null;
     jump.retainedFrontier = false;
+    jump.provisionalFits = null;
   }
   const error = loc.rank - jump.target;
   const suspect = p && loc.corroborated && Math.abs(loc.rank - p.pos) > 2.4 * p.sd;
@@ -261,16 +275,24 @@ function observe(jump, learned, rank, row, { rng = Math.random, done } = {}) {
         (p.warm || p.direction > 0) && Math.abs(loc.rank - p.pos) <= 3 * p.sd) {
       const key = p.warm ? "warm" : "cold";
       const session = p.warm ? jump.warmSession : jump.session;
-      const fit = learned[key] || (learned[key] = model(p.warm));
       const y = Math.log(moved / done);
       const innovation = clamp(y - p.mu - session.mu, -1.3, 1.3);
       const gain = session.var / (session.var + 0.09);
-      // Learn the global context model with a noisy label from this session.
-      update(fit, p.x, y - session.mu, 0.6 + session.var);
+      const label = y - session.mu;
+      const noise = 0.6 + session.var;
+      if (loc.corroborated) {
+        const fit = learned[key] || (learned[key] = model(p.warm));
+        update(fit, p.x, label, noise);
+        learned.samples = (learned.samples || 0) + 1;
+        sample = { warm: p.warm, x: p.x, y, verified: true };
+      } else if (!jump.provisionalFits?.[key]) {
+        // Copy the last corroborated fit. An uncertain reading can help this
+        // jump adapt without altering the model used by future jumps.
+        (jump.provisionalFits ??= {})[key] = { ...(learned[key] || model(p.warm)) };
+      }
+      if (jump.provisionalFits?.[key]) update(jump.provisionalFits[key], p.x, label, noise);
       session.mu = clamp(session.mu + gain * innovation, -1.4, 1.4);
       session.var = Math.max(0.04, (1 - gain) * session.var + 0.025);
-      learned.samples = (learned.samples || 0) + 1;
-      sample = { warm: p.warm, x: p.x, y, verified: loc.corroborated };
     }
   }
   if (Math.abs(error) <= TOLERANCE && loc.corroborated && (!jump.leading || error <= 1)) {

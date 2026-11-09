@@ -236,7 +236,13 @@ impl<D: Device + 'static> Engine<D> {
             self.set(|s| { s.busy = false; s.last_error = "Open TikTok's Saved grid".into(); });
             return;
         }
-        if verify && self.dev.borrow_mut().screen_anchor(0).await.is_none() {
+        let check_only = n == 0 && pn == 0 && *self.auto_check.borrow() &&
+            check.split(';').map(str::trim).filter(|step| !step.is_empty())
+                .find(|step| step.split_whitespace().next() != Some("W"))
+                .is_some_and(|step| step.split_whitespace().take(2).eq(["A", "0"]));
+        // The first macro tap already gets its own fresh Saved-grid anchor.
+        // Motion legs still verify the grid before opening a gesture session.
+        if verify && !check_only && self.dev.borrow_mut().screen_anchor(0).await.is_none() {
             self.set(|s| { s.busy = false; s.last_error = "Open TikTok's Saved grid".into(); });
             return;
         }
@@ -270,7 +276,7 @@ impl<D: Device + 'static> Engine<D> {
             self.status.lock().unwrap().last_error.is_empty();
         if run_check {
             self.set(|s| s.checking = true);
-            Self::sleep_or_stop(&stop, 800).await;
+            if !check_only { Self::sleep_or_stop(&stop, 800).await; }
             self.run_macro(check).await;
             self.set(|s| s.check_end_ms = now_ms());
         }
@@ -635,6 +641,19 @@ mod tests {
             e.run_macro("G;T 100 200;R 101 201 301 401 501 601").await;
             assert!(e.dev.borrow().log.is_empty());
             assert_eq!(e.status_json()["error"], "Could not verify the Saved grid");
+        });
+    }
+
+    #[test]
+    fn check_only_dive_uses_the_macro_guard_before_any_tap() {
+        run(async {
+            let mut device = MockDevice::new();
+            device.off_grid = true;
+            let e = Engine::new(device, Some("tok".into()));
+            *e.auto_check.borrow_mut() = true;
+            e.run_dive(0, 1000, 400, 180, 0, 1000, 400, "W 1;A 0 100 200;T 300 400", true).await;
+            assert!(e.dev.borrow().log.is_empty());
+            assert_eq!(e.status_json()["error"], "Could not verify a visible Saved tile");
         });
     }
 

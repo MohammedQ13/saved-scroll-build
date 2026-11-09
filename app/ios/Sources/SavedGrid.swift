@@ -26,7 +26,7 @@ func ssScreenAnchor(_ bytes: UnsafePointer<UInt8>, _ count: Int, _ kind: Int32) 
             ScreenLabel(text: text.lowercased().trimmingCharacters(in: .whitespaces),
                         x: region.minX + box.midX * region.width, y: 1 - region.minY - box.midY * region.height)
         }
-        let phrases = kind == 0 ? ["search saved posts", "posts ", "collections", "sounds"] :
+        let phrases = kind == 0 ? ["search saved posts", "posts ", "collections", "sounds", "effects"] :
                       kind == 2 ? ["send to", "copy link"] : []
         let labels = (request.results ?? []).flatMap { result -> [ScreenLabel] in
             guard let candidate = result.topCandidates(1).first else { return [] }
@@ -71,13 +71,15 @@ private func gridAnchor(_ labels: [ScreenLabel]) -> CGFloat? {
     }) {
         return search.y + 0.054
     }
-    // At the top, search is an icon. Require the three Saved subtabs in order
+    // At the top, search is an icon. Require three Saved subtabs in order
     // on the same line before treating the content below them as a tile.
     guard let posts = labels.first(where: { $0.x < 0.24 && (0.15...0.46).contains($0.y) && ($0.text == "posts" || $0.text.hasPrefix("posts ")) }),
           labels.contains(where: { (0.26...0.54).contains($0.x) && $0.text.hasPrefix("collections") && abs($0.y - posts.y) < 0.012 }),
           labels.contains(where: {
               let rightEdge: CGFloat = $0.text.contains("effe") ? 0.82 : 0.76
-              return (0.55...rightEdge).contains($0.x) && $0.text.hasPrefix("sounds") && abs($0.y - posts.y) < 0.012
+              let sounds = (0.55...rightEdge).contains($0.x) && $0.text.hasPrefix("sounds")
+              let effects = (0.71...0.94).contains($0.x) && $0.text.hasPrefix("effects")
+              return (sounds || effects) && abs($0.y - posts.y) < 0.012
           })
     else { return nil }
     return posts.y + 0.051

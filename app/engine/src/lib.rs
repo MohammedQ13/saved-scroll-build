@@ -59,6 +59,7 @@ pub struct MockDevice {
     pub sessions: u32,
     pub ok: bool,
     pub off_grid: bool,
+    pub miss_grid_once: bool,
     pub missing_anchor: Option<i32>,
     pub connect_ms: u64,
     pub activate_on_tap: Option<(u16, u16)>,
@@ -86,6 +87,7 @@ impl Device for MockDevice {
         Ok(())
     }
     async fn screen_anchor(&mut self, kind: i32) -> Option<u16> {
+        if kind == 0 && std::mem::take(&mut self.miss_grid_once) { return None; }
         (!(kind == 0 && self.off_grid) && self.missing_anchor != Some(kind)).then_some(1)
     }
     fn connected(&self) -> bool { self.ok }
@@ -322,7 +324,13 @@ impl<D: Device + 'static> Engine<D> {
                 }
                 "W" => Self::sleep_or_stop(&self.stop, a.first().copied().unwrap_or(0).max(0) as u64).await,
                 "G" => {
-                    if self.dev.borrow_mut().screen_anchor(0).await.is_none() {
+                    let mut saved = self.dev.borrow_mut().screen_anchor(0).await.is_some();
+                    if !saved {
+                        Self::sleep_or_stop(&self.stop, 400).await;
+                        if *self.stop.borrow() || APP_IN_FRONT.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                        saved = self.dev.borrow_mut().screen_anchor(0).await.is_some();
+                    }
+                    if !saved {
                         self.set(|s| { s.check_failed = true; s.last_error = "Could not verify the Saved grid".into(); });
                         break;
                     }
@@ -654,6 +662,18 @@ mod tests {
             e.run_dive(0, 1000, 400, 180, 0, 1000, 400, "W 1;A 0 100 200;T 300 400", true).await;
             assert!(e.dev.borrow().log.is_empty());
             assert_eq!(e.status_json()["error"], "Could not verify a visible Saved tile");
+        });
+    }
+
+    #[test]
+    fn return_guard_allows_one_delayed_saved_frame() {
+        run(async {
+            let mut device = MockDevice::new();
+            device.miss_grid_once = true;
+            let e = Engine::new(device, Some("tok".into()));
+            e.run_macro("G;T 100 200").await;
+            assert_eq!(e.dev.borrow().log, ["tap 100 200"]);
+            assert_eq!(e.status_json()["checkFailed"], false);
         });
     }
 

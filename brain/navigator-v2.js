@@ -140,7 +140,8 @@ function plan(jump, learned, context = {}, { rng = Math.random, explore = false,
   const eligible = !fine && !warm && distance > 700 && !context.lowPower && !(context.thermal >= 2);
   const randomized = eligible && calibrate;
   // GridLab GL-04 found 5%-height drags could open posts. Use at least 10%.
-  const rhythms = fine ? [{ iv: 1000, dy: clamp(Math.round(distance * 10), 100, 240), dur: 480 }]
+  const fineMinimum = jump.stalled > 0 ? (tuning.stallBoost || 100) : 100;
+  const rhythms = fine ? [{ iv: 1000, dy: clamp(Math.round(distance * 10), fineMinimum, 240), dur: 480 }]
     : randomized ? [RHYTHMS[Math.floor(rng() * RHYTHMS.length)]]
     : eligible && explore ? RHYTHMS : [BASE];
   const draw = rhythms.length > 1 ? sampleParameters(fit, rng) : null;

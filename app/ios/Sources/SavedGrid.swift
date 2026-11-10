@@ -117,6 +117,16 @@ private func shareAnchor(_ labels: [ScreenLabel], image: Data) -> CGFloat? {
         }
     }
     if let best { return best.start + 0.198 }
+    // A bright background can merge a trailing dash into the likes count and
+    // hide the other counts. Only accept that lone reading when the saved
+    // bookmark independently appears at the expected third rail position.
+    if let likes = onRail.first(where: {
+        (0.50...0.61).contains($0.y) &&
+        $0.text.range(of: #"^\d[\d., ]*[kmb]?\s*[-–—]?$"#, options: .regularExpression) != nil &&
+        hasSavedBookmark(image, above: $0.y + 0.152)
+    }) {
+        return likes.y + 0.198
+    }
     // A saved post has a yellow bookmark directly above its save count.
     // Use that independent cue when white action counts blend into the post.
     // The macro still verifies the Share sheet before any Copy link tap.

@@ -79,6 +79,10 @@ enum SavedGridProbe {
                     lines: [("28", 0.924, 0.735)], bookmark: true)
         checkAnchor("A lone numeral cannot locate Share", kind: 1, expected: 0,
                     lines: [("28", 0.924, 0.735)])
+        checkAnchor("Likes and saved bookmark with unread remaining counts", kind: 1, expected: 0.782,
+                    lines: [("788—", 0.924, 0.584)], bookmark: true)
+        checkAnchor("Lone likes count cannot locate Share", kind: 1, expected: 0,
+                    lines: [("788—", 0.924, 0.584)])
         checkAnchor("Saved tabs with merged Sounds and Effects", kind: 0, expected: 0.488, lines: [
             ("Posts 36K", 0.14, 0.437), ("Collections 27", 0.42, 0.437), ("Sounds 1 Effects", 0.78, 0.437),
         ])
@@ -92,7 +96,7 @@ enum SavedGridProbe {
             ("Send to", 0.5, 0.593), ("Repost  Copy link  WhatsApp", 0.29, 0.827),
         ])
         checkAnchor("Copy without share sheet", kind: 2, expected: 0, lines: [("Copy link", 0.27, 0.827)])
-        print("Vision passed \(fixtures.count + 14) synthetic screen checks.")
+        print("Vision passed \(fixtures.count + 16) synthetic screen checks.")
     }
 
     static func checkAnchor(_ name: String, kind: Int32, expected: CGFloat, lines: [(String, CGFloat, CGFloat)], bookmark: Bool = false) {

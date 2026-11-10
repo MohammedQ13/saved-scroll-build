@@ -83,8 +83,9 @@ private func recordViewportShadow(_ image: Data, anchor: CGFloat) {
         let file = try FileHandle(forWritingTo: url)
         defer { try? file.close() }
         try file.seekToEnd()
-        try file.write(contentsOf: json)
-        try file.write(contentsOf: Data([10]))
+        var line = json
+        line.append(10)
+        try file.write(contentsOf: line)
     } catch {
         ssLog.notice("viewport shadow write failed")
     }
@@ -95,6 +96,13 @@ private func recordViewportShadow(_ image: Data, anchor: CGFloat) {
 func ssScreenCaptureFailed(_ kind: Int32, _ timedOut: Int32) {
     #if os(iOS)
     ssLog.notice("screen anchor \(kind): capture \(timedOut == 1 ? "timed out" : "failed")")
+    #endif
+}
+
+@_cdecl("ss_macro_retry_event")
+func ssMacroRetryEvent(_ stage: Int32) {
+    #if os(iOS)
+    ssLog.notice("tile retry stage \(stage)")
     #endif
 }
 

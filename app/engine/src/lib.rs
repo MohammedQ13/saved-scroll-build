@@ -37,6 +37,16 @@ pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
+fn log_tile_retry(stage: i32) {
+    #[cfg(target_os = "ios")]
+    unsafe {
+        extern "C" { fn ss_macro_retry_event(stage: i32); }
+        ss_macro_retry_event(stage);
+    }
+    #[cfg(not(target_os = "ios"))]
+    let _ = stage;
+}
+
 /// Something that can touch the screen. Calls are made from one thread (a current-thread runtime).
 #[allow(async_fn_in_trait)]
 pub trait Device {
@@ -348,10 +358,12 @@ impl<D: Device + 'static> Engine<D> {
                     let mut anchor = self.dev.borrow_mut().screen_anchor(if kind == 0 { 3 } else { kind }).await;
                     if *self.stop.borrow() || APP_IN_FRONT.load(std::sync::atomic::Ordering::Relaxed) { break; }
                     if kind == 1 && anchor.is_none() {
+                        log_tile_retry(1); // Share was not recognized.
                         if let Some((x, y, saved_anchor)) = last_tile {
                             let current = self.dev.borrow_mut().screen_anchor(0).await;
                             if *self.stop.borrow() || APP_IN_FRONT.load(std::sync::atomic::Ordering::Relaxed) { break; }
                             if current.is_some_and(|now| now.abs_diff(saved_anchor) <= 200) {
+                                log_tile_retry(2); // The same Saved geometry was recognized.
                                 if let Err(error) = self.dev.borrow_mut().tap(x, y).await {
                                     self.set(|s| { s.check_failed = true; s.last_error = error; });
                                     break;
@@ -359,6 +371,7 @@ impl<D: Device + 'static> Engine<D> {
                                 Self::sleep_or_stop(&self.stop, 1800).await;
                                 if *self.stop.borrow() || APP_IN_FRONT.load(std::sync::atomic::Ordering::Relaxed) { break; }
                                 anchor = self.dev.borrow_mut().screen_anchor(1).await;
+                                log_tile_retry(if anchor.is_some() { 3 } else { 4 });
                                 if *self.stop.borrow() || APP_IN_FRONT.load(std::sync::atomic::Ordering::Relaxed) { break; }
                             }
                         }

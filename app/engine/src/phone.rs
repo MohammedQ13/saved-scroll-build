@@ -79,6 +79,18 @@ pub struct PhoneDevice {
 }
 
 impl PhoneDevice {
+    /// Laptop-only diagnostic: exercise the same capture service inside an
+    /// existing touch session without saving the personal screen contents.
+    #[cfg(not(target_os = "ios"))]
+    pub async fn probe_capture(&mut self) -> Result<usize, String> {
+        use idevice::core_device::{ImageFormat, ScreenCaptureServiceClient};
+        let adapter = self.adapter.as_mut().ok_or("no adapter")?;
+        let hs = self.handshake.as_mut().ok_or("no handshake")?;
+        let mut client = ScreenCaptureServiceClient::connect_rsd(adapter, hs).await.map_err(|e| format!("capture connect: {e:?}"))?;
+        let frame = client.take_screenshot(None, ImageFormat::Png).await.map_err(|e| format!("capture: {e:?}"))?;
+        Ok(frame.len())
+    }
+
     /// `pairing_path`: the RemotePairing record (plist) for this phone. `addr`: defaults to 10.7.0.1:49152.
     pub fn new(pairing_path: &str, addr: Option<SocketAddr>) -> Self {
         Self {

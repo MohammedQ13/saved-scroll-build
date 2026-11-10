@@ -364,7 +364,9 @@ impl<D: Device + 'static> Engine<D> {
                             if *self.stop.borrow() || APP_IN_FRONT.load(std::sync::atomic::Ordering::Relaxed) { break; }
                             if current.is_some_and(|now| now.abs_diff(saved_anchor) <= 200) {
                                 log_tile_retry(2); // The same Saved geometry was recognized.
-                                if let Err(error) = self.dev.borrow_mut().tap(x, y).await {
+                                // An explicitly held, stationary contact is a
+                                // bounded retry, not a scroll or long press.
+                                if let Err(error) = self.dev.borrow_mut().drag(x, y, x, y, 3, 40).await {
                                     self.set(|s| { s.check_failed = true; s.last_error = error; });
                                     break;
                                 }
@@ -733,7 +735,7 @@ mod tests {
             device.miss_share_once = true;
             let e = Engine::new(device, Some("tok".into()));
             e.run_macro("A 0 100 200;A 1 300 0").await;
-            assert_eq!(e.dev.borrow().log, ["tap 100 201", "tap 100 201", "tap 300 1"]);
+            assert_eq!(e.dev.borrow().log, ["tap 100 201", "drag 100 201 100 201 3 40", "tap 300 1"]);
             assert_eq!(e.status_json()["checkFailed"], false);
         });
     }

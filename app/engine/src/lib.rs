@@ -88,7 +88,7 @@ impl Device for MockDevice {
     }
     async fn screen_anchor(&mut self, kind: i32) -> Option<u16> {
         if kind == 0 && std::mem::take(&mut self.miss_grid_once) { return None; }
-        (!(kind == 0 && self.off_grid) && self.missing_anchor != Some(kind)).then_some(1)
+        (!((kind == 0 || kind == 3) && self.off_grid) && self.missing_anchor != Some(if kind == 3 { 0 } else { kind })).then_some(1)
     }
     fn connected(&self) -> bool { self.ok }
 }
@@ -338,7 +338,9 @@ impl<D: Device + 'static> Engine<D> {
                 // A verifies the screen and taps at the observed anchor plus a row offset.
                 "A" => {
                     let kind = u(0) as i32;
-                    let anchor = self.dev.borrow_mut().screen_anchor(kind).await;
+                    // Kind 3 performs the same Saved guard while collecting a
+                    // shadow descriptor from this already-required frame.
+                    let anchor = self.dev.borrow_mut().screen_anchor(if kind == 0 { 3 } else { kind }).await;
                     if *self.stop.borrow() || APP_IN_FRONT.load(std::sync::atomic::Ordering::Relaxed) { break; }
                     let Some(y) = anchor.and_then(|y| y.checked_add(u(2))).filter(|&y| y < 59000) else {
                         let error = match kind {

@@ -7,13 +7,16 @@ import Vision
 /// is no verified anchor. The frame and its text stay on the phone.
 @_cdecl("ss_screen_anchor")
 func ssScreenAnchor(_ bytes: UnsafePointer<UInt8>, _ count: Int, _ kind: Int32) -> Int32 {
+    // Kind 3 is the same guard as kind 0, with shadow-only capture for the
+    // pre-tap frame. It never changes the anchor or decides arrival.
+    let screenKind: Int32 = kind == 3 ? 0 : kind
     let regions = [
         CGRect(x: 0, y: 0.53, width: 1, height: 0.37),      // Saved tabs or pinned search
         CGRect(x: 0.86, y: 0.16, width: 0.14, height: 0.40), // Post's vertical action rail
         CGRect(x: 0, y: 0.11, width: 1, height: 0.36),      // Share sheet
     ]
-    guard regions.indices.contains(Int(kind)) else { return 0 }
-    let region = regions[Int(kind)]
+    guard regions.indices.contains(Int(screenKind)) else { return 0 }
+    let region = regions[Int(screenKind)]
     let data = Data(bytes: bytes, count: count)
     for level in [VNRequestTextRecognitionLevel.fast, .accurate] {
         let request = VNRecognizeTextRequest()
@@ -26,8 +29,8 @@ func ssScreenAnchor(_ bytes: UnsafePointer<UInt8>, _ count: Int, _ kind: Int32) 
             ScreenLabel(text: text.lowercased().trimmingCharacters(in: .whitespaces),
                         x: region.minX + box.midX * region.width, y: 1 - region.minY - box.midY * region.height)
         }
-        let phrases = kind == 0 ? ["search saved posts", "posts ", "collections", "sounds", "effects"] :
-                      kind == 2 ? ["send to", "copy link"] : []
+        let phrases = screenKind == 0 ? ["search saved posts", "posts ", "collections", "sounds", "effects"] :
+                      screenKind == 2 ? ["send to", "copy link"] : []
         let labels = (request.results ?? []).flatMap { result -> [ScreenLabel] in
             guard let candidate = result.topCandidates(1).first else { return [] }
             let pieces = phrases.compactMap { phrase -> ScreenLabel? in
@@ -37,14 +40,56 @@ func ssScreenAnchor(_ bytes: UnsafePointer<UInt8>, _ count: Int, _ kind: Int32) 
             }
             return [label(candidate.string, result.boundingBox)] + pieces
         }
-        let anchor = kind == 0 ? gridAnchor(labels) : kind == 1 ? shareAnchor(labels, image: data) : copyAnchor(labels)
-        if let anchor, (0..<1).contains(anchor) { return Int32(anchor * 65535) }
+        let anchor = screenKind == 0 ? gridAnchor(labels) : screenKind == 1 ? shareAnchor(labels, image: data) : copyAnchor(labels)
+        if let anchor, (0..<1).contains(anchor) {
+            #if os(iOS)
+            if kind == 3 { recordViewportShadow(data, anchor: anchor) }
+            #endif
+            return Int32(anchor * 65535)
+        }
     }
     #if os(iOS)
     ssLog.notice("screen anchor \(kind): no matching layout")
     #endif
     return 0
 }
+
+#if os(iOS)
+/// Coarse pixels stay on the phone and are only for offline shadow analysis.
+/// An exact visual match is not a position witness, especially after a re-save.
+private func recordViewportShadow(_ image: Data, anchor: CGFloat) {
+    guard let source = CGImageSourceCreateWithData(image as CFData, nil),
+          let frame = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return }
+    let bounds = CGRect(x: CGFloat(frame.width) * 0.02, y: CGFloat(frame.height) * 0.27,
+                        width: CGFloat(frame.width) * 0.96, height: CGFloat(frame.height) * 0.61).integral
+    guard let grid = frame.cropping(to: bounds),
+          let context = CGContext(data: nil, width: 48, height: 64, bitsPerComponent: 8,
+                                  bytesPerRow: 48 * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    else { return }
+    context.interpolationQuality = .medium
+    context.draw(grid, in: CGRect(x: 0, y: 0, width: 48, height: 64))
+    guard let pixels = context.data else { return }
+    let record: [String: Any] = ["version": 1, "at": Date().timeIntervalSince1970 * 1000,
+                                 "anchor": Double(anchor), "width": 48, "height": 64,
+                                 "rgba": Data(bytes: pixels, count: 48 * 64 * 4).base64EncodedString()]
+    guard let json = try? JSONSerialization.data(withJSONObject: record),
+          let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+    let url = directory.appendingPathComponent("ss-viewport-shadow.jsonl")
+    do {
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try Data().write(to: url, options: .atomic)
+        }
+        let file = try FileHandle(forWritingTo: url)
+        defer { try? file.close() }
+        try file.seekToEnd()
+        try file.write(contentsOf: json)
+        try file.write(contentsOf: Data([10]))
+    } catch {
+        ssLog.notice("viewport shadow write failed")
+    }
+}
+#endif
 
 @_cdecl("ss_screen_capture_failed")
 func ssScreenCaptureFailed(_ kind: Int32, _ timedOut: Int32) {

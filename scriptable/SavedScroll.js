@@ -187,8 +187,8 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     if (!state.armed && jump.goal) state.armed = { ...jump.goal, at: now };
   }
 
-  function failV2(jump, text, error) {
-    recordV2("failed", jump, { error });
+  function failV2(jump, text, error, reason) {
+    recordV2("failed", jump, { error, reason });
     rearmV2(jump);
     state.jumpV2 = null;
     return out({ ok: false, text });
@@ -221,12 +221,13 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     const st = await remoteReady();
     if (!st || st.busy || st.checking || !st.autoCheck || !st.hasCheckMacro || !st.verifiedDives) {
       return failV2(jump, st?.busy || st?.checking ? "Saved Scroll is already moving." :
-        "Turn on hands-free checks and make sure LocalDevVPN is connected.");
+        "Turn on hands-free checks and make sure LocalDevVPN is connected.", undefined,
+        st?.busy || st?.checking ? "engine-busy" : "engine-not-ready");
     }
     const action = jump.action;
     const { propensity, ...gesture } = action;
     const res = await remote.dive({ ...gesture, pn: 0, idle: 1, guard: 1 });
-    if (!res?.ok || !Number.isFinite(res.runId)) return failV2(jump, appProblem(st, res).text);
+    if (!res?.ok || !Number.isFinite(res.runId)) return failV2(jump, appProblem(st, res).text, undefined, "dispatch");
     jump.inFlight = { id: res.runId, at: now, ...action, motionRun: action.n ? res.runId : jump.motionRun };
     if (action.n) jump.motionRun = res.runId;
     jump.action = null;
@@ -236,14 +237,14 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
   }
 
   if (v2 && cmd.cmd === "check-failed" && state.jumpV2) {
-    return failV2(state.jumpV2, "Couldn't verify the Saved grid or read a fresh link. Open Saved and try again.");
+    return failV2(state.jumpV2, "Couldn't verify the Saved grid or read a fresh link. Open Saved and try again.", undefined, "check-failed");
   }
 
   if (v2 && cmd.cmd === "arrived" && state.jumpV2) {
     const jump = state.jumpV2, flight = jump.inFlight, st = await remoteStatus();
     if (!flight || st?.busy || st?.checking) return out({ ok: false, text: "Wait for Saved Scroll to finish checking." });
     if (!st || st.runId !== flight.id || st.done !== flight.n || st.error || st.checkFailed) {
-      return failV2(jump, "The scroll was interrupted. Return to Saved and start again.");
+      return failV2(jump, "The scroll was interrupted. Return to Saved and start again.", undefined, "interrupted");
     }
     const w = await where(cmd.link);
     if (flight.n) {
@@ -269,7 +270,7 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
       motionMs: result.sample ? jump.motionMs : undefined, error: result.error, sample: result.sample,
       verified: !!(result.located || result.done) });
     jump.inFlight = null;
-    if (result.failed) return failV2(jump, result.failed, result.error);
+    if (result.failed) return failV2(jump, result.failed, result.error, "localization");
     if (result.done) {
       const observed = result.anchors.map(rank => lib.saves[rank - 1]).filter(Boolean);
       const match = observed.find(save => targetMatches(jump, save));

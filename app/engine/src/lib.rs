@@ -60,6 +60,8 @@ pub struct MockDevice {
     pub ok: bool,
     pub off_grid: bool,
     pub miss_grid_once: bool,
+    pub miss_share_once: bool,
+    pub off_grid_after_first_tap: bool,
     pub missing_anchor: Option<i32>,
     pub connect_ms: u64,
     pub activate_on_tap: Option<(u16, u16)>,
@@ -81,6 +83,7 @@ impl Device for MockDevice {
     }
     async fn tap(&mut self, x: u16, y: u16) -> Result<(), String> {
         self.log.push(format!("tap {x} {y}"));
+        if self.off_grid_after_first_tap { self.off_grid = true; }
         if self.activate_on_tap == Some((x, y)) {
             APP_ACTIVE_MS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -88,6 +91,7 @@ impl Device for MockDevice {
     }
     async fn screen_anchor(&mut self, kind: i32) -> Option<u16> {
         if kind == 0 && std::mem::take(&mut self.miss_grid_once) { return None; }
+        if kind == 1 && std::mem::take(&mut self.miss_share_once) { return None; }
         (!((kind == 0 || kind == 3) && self.off_grid) && self.missing_anchor != Some(if kind == 3 { 0 } else { kind })).then_some(1)
     }
     fn connected(&self) -> bool { self.ok }
@@ -309,6 +313,7 @@ impl<D: Device + 'static> Engine<D> {
 
     /// Steps separated by ';' with normalised coordinates. R tries the status-bar return link, then PiP.
     pub async fn run_macro(&self, steps: &str) {
+        let mut last_tile: Option<(u16, u16, u16)> = None;
         for st in steps.split(';').map(str::trim).filter(|s| !s.is_empty()) {
             if *self.stop.borrow() { break; }
             let mut it = st.split_whitespace();
@@ -340,8 +345,24 @@ impl<D: Device + 'static> Engine<D> {
                     let kind = u(0) as i32;
                     // Kind 3 performs the same Saved guard while collecting a
                     // shadow descriptor from this already-required frame.
-                    let anchor = self.dev.borrow_mut().screen_anchor(if kind == 0 { 3 } else { kind }).await;
+                    let mut anchor = self.dev.borrow_mut().screen_anchor(if kind == 0 { 3 } else { kind }).await;
                     if *self.stop.borrow() || APP_IN_FRONT.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                    if kind == 1 && anchor.is_none() {
+                        if let Some((x, y, saved_anchor)) = last_tile {
+                            let current = self.dev.borrow_mut().screen_anchor(0).await;
+                            if *self.stop.borrow() || APP_IN_FRONT.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                            if current.is_some_and(|now| now.abs_diff(saved_anchor) <= 200) {
+                                if let Err(error) = self.dev.borrow_mut().tap(x, y).await {
+                                    self.set(|s| { s.check_failed = true; s.last_error = error; });
+                                    break;
+                                }
+                                Self::sleep_or_stop(&self.stop, 1800).await;
+                                if *self.stop.borrow() || APP_IN_FRONT.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                                anchor = self.dev.borrow_mut().screen_anchor(1).await;
+                                if *self.stop.borrow() || APP_IN_FRONT.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                            }
+                        }
+                    }
                     let Some(y) = anchor.and_then(|y| y.checked_add(u(2))).filter(|&y| y < 59000) else {
                         let error = match kind {
                             0 => "Could not verify a visible Saved tile",
@@ -355,6 +376,7 @@ impl<D: Device + 'static> Engine<D> {
                         self.set(|s| { s.check_failed = true; s.last_error = error; });
                         break;
                     }
+                    if kind == 0 { last_tile = anchor.map(|base| (u(1), y, base)); }
                 }
                 "R" => {
                     use std::sync::atomic::Ordering::Relaxed;
@@ -687,6 +709,31 @@ mod tests {
             let e = Engine::new(device, Some("tok".into()));
             e.run_macro("A 0 100 200;A 1 300 0;A 2 500 0;D 2 20 850 20 300;R 101 201 301 401 501 601").await;
             assert_eq!(e.dev.borrow().log, ["tap 100 201", "tap 300 1"]);
+            assert_eq!(e.status_json()["checkFailed"], true);
+        });
+    }
+
+    #[test]
+    fn unopened_tile_is_retried_once_only_on_the_same_verified_grid() {
+        run(async {
+            let mut device = MockDevice::new();
+            device.miss_share_once = true;
+            let e = Engine::new(device, Some("tok".into()));
+            e.run_macro("A 0 100 200;A 1 300 0").await;
+            assert_eq!(e.dev.borrow().log, ["tap 100 201", "tap 100 201", "tap 300 1"]);
+            assert_eq!(e.status_json()["checkFailed"], false);
+        });
+    }
+
+    #[test]
+    fn missing_share_never_retries_a_tile_without_a_verified_grid() {
+        run(async {
+            let mut device = MockDevice::new();
+            device.miss_share_once = true;
+            device.off_grid_after_first_tap = true;
+            let e = Engine::new(device, Some("tok".into()));
+            e.run_macro("A 0 100 200;A 1 300 0").await;
+            assert_eq!(e.dev.borrow().log, ["tap 100 201"]);
             assert_eq!(e.status_json()["checkFailed"], true);
         });
     }

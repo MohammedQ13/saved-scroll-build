@@ -135,7 +135,9 @@ private func shareAnchor(_ labels: [ScreenLabel], image: Data) -> CGFloat? {
     // one unread count, such as a single digit over a busy photo background.
     let onRail = labels.filter { (0.89...0.96).contains($0.x) }
     let counts = onRail.filter {
-        $0.text.range(of: #"^\d[\d., ]*[kmb]?$"#, options: .regularExpression) != nil
+        // OCR can merge a short icon fragment or bullet with a count. The
+        // rail's spacing still has to corroborate three separate positions.
+        $0.text.range(of: #"^[^\d]{0,3}\d[\d., ]*[kmb]?\s*[-–—]?$"#, options: .regularExpression) != nil
     }.map(\.y)
     let emptyComments = onRail.first { $0.text == "add 1st" }?.y
     let rail: [CGFloat] = [0, 0.076, 0.152, 0.228]

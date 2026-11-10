@@ -70,6 +70,11 @@ enum SavedGridProbe {
         checkAnchor("Video Share", kind: 1, expected: 0.741, lines: [
             ("123.4K", 0.924, 0.543), ("12.3K", 0.924, 0.619), ("34.5K", 0.924, 0.695),
         ])
+        checkAnchor("Share counts with merged icon fragments", kind: 1, expected: 0.782, lines: [
+            ("YM17.2K", 0.924, 0.584), ("26", 0.924, 0.660), ("•1226", 0.924, 0.812),
+        ])
+        checkAnchor("One merged count cannot locate Share", kind: 1, expected: 0,
+                    lines: [("•1226", 0.924, 0.812)])
         checkAnchor("Photo Share", kind: 1, expected: 0.775, lines: [
             ("2,147", 0.924, 0.577), ("4", 0.924, 0.653), ("789", 0.924, 0.729),
         ])
@@ -100,7 +105,7 @@ enum SavedGridProbe {
             ("Send to", 0.5, 0.593), ("Repost  Copy link  WhatsApp", 0.29, 0.827),
         ])
         checkAnchor("Copy without share sheet", kind: 2, expected: 0, lines: [("Copy link", 0.27, 0.827)])
-        print("Vision passed \(fixtures.count + 18) synthetic screen checks.")
+        print("Vision passed \(fixtures.count + 20) synthetic screen checks.")
     }
 
     static func checkAnchor(_ name: String, kind: Int32, expected: CGFloat, lines: [(String, CGFloat, CGFloat)], bookmark: Bool = false) {

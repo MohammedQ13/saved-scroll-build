@@ -88,9 +88,9 @@ enum SavedGridProbe {
         ])
         checkAnchor("One merged count cannot locate Share", kind: 1, expected: 0,
                     lines: [("•1226", 0.924, 0.812)])
-        checkAnchor("Photo Share", kind: 1, expected: 0.775, lines: [
+        checkAnchor("Photo Share uses the bookmark to resolve two rail alignments", kind: 1, expected: 0.775, lines: [
             ("2,147", 0.924, 0.577), ("4", 0.924, 0.653), ("789", 0.924, 0.729),
-        ])
+        ], bookmark: true)
         checkAnchor("Photo Share with an unread count", kind: 1, expected: 0.786, lines: [
             ("2,147", 0.924, 0.588), ("789", 0.924, 0.740), ("451", 0.924, 0.816),
         ])

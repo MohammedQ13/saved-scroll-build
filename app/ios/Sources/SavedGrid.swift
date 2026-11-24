@@ -215,9 +215,15 @@ private func shareAnchor(_ labels: [ScreenLabel], image: Data) -> CGFloat? {
     }
     if let best = candidates.max(by: { $0.score < $1.score }) {
         // Three counts can fit two rails a button apart when an end count
-        // is missing. Do not tap a neighboring action in that case.
-        let ambiguous = candidates.contains { $0.count == best.count && abs($0.start - best.start) > 0.04 }
-        return ambiguous ? nil : best.start + 0.198
+        // is missing. Use the independently located saved bookmark to
+        // distinguish them, and require exactly one candidate to fit it.
+        guard let alternative = candidates.filter({
+            $0.count == best.count && abs($0.start - best.start) > 0.04
+        }).max(by: { $0.score < $1.score }) else { return best.start + 0.198 }
+        let bestHasBookmark = hasSavedBookmark(image, above: best.start + rail[2])
+        let alternativeHasBookmark = hasSavedBookmark(image, above: alternative.start + rail[2])
+        guard bestHasBookmark != alternativeHasBookmark else { return nil }
+        return (bestHasBookmark ? best.start : alternative.start) + 0.198
     }
     // A bright background can merge a trailing dash into the likes count and
     // hide the other counts. Only accept that lone reading when the saved

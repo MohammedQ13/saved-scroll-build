@@ -56,6 +56,10 @@ enum SavedGridProbe {
         checkAnchor("Saved tabs at top", kind: 0, expected: 0.488, lines: [
             ("Posts 35K", 0.14, 0.437), ("Collections 25", 0.42, 0.437), ("Sounds 1", 0.68, 0.437),
         ])
+        checkAnchor("Saved tiles below the unavailable-posts notice", kind: 3, expected: 0.577, lines: [
+            ("Posts 35K", 0.14, 0.437), ("Collections 25", 0.42, 0.437), ("Sounds 1", 0.68, 0.437),
+            ("Remove unavailable posts for a smoother", 0.39, 0.485), ("experience. Remove", 0.22, 0.502),
+        ])
         checkAnchor("Saved with out-of-order dates on tiles", kind: 0, expected: 0.294, lines: [
             ("Search saved posts", 0.30, 0.24), ("Oct 21", 0.14, 0.32),
             ("Sep 28", 0.48, 0.32), ("Oct 5", 0.81, 0.32),
@@ -105,7 +109,7 @@ enum SavedGridProbe {
             ("Send to", 0.5, 0.593), ("Repost  Copy link  WhatsApp", 0.29, 0.827),
         ])
         checkAnchor("Copy without share sheet", kind: 2, expected: 0, lines: [("Copy link", 0.27, 0.827)])
-        print("Vision passed \(fixtures.count + 20) synthetic screen checks.")
+        print("Vision passed \(fixtures.count + 21) synthetic screen checks.")
     }
 
     static func checkAnchor(_ name: String, kind: Int32, expected: CGFloat, lines: [(String, CGFloat, CGFloat)], bookmark: Bool = false) {

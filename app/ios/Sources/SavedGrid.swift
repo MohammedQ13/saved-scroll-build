@@ -3,7 +3,7 @@ import CoreGraphics
 import ImageIO
 import Vision
 
-private let gridRegion = CGRect(x: 0, y: 0.53, width: 1, height: 0.37)
+private let gridRegion = CGRect(x: 0, y: 0.46, width: 1, height: 0.44)
 private let gridPhrases = ["search saved posts", "posts ", "collections", "sounds", "effects"]
 
 /// Coordinates are in the engine's top-left 0...65535 space. Zero means there
@@ -163,7 +163,14 @@ private func gridAnchor(_ labels: [ScreenLabel]) -> CGFloat? {
               return (sounds || effects) && abs($0.y - posts.y) < 0.012
           })
     else { return nil }
-    return posts.y + 0.051
+    let ordinaryTile = posts.y + 0.051
+    // TikTok can put a removal notice above the first row while the tabs
+    // are visible. The usual tile coordinate can land inside the notice.
+    let notice = labels.filter {
+        $0.x < 0.75 && (0.025...0.095).contains($0.y - posts.y) &&
+        ($0.text.contains("unavailable posts") || $0.text.contains("experience. remove"))
+    }.map(\.y).max()
+    return notice.map { max(ordinaryTile, $0 + 0.075) } ?? ordinaryTile
 }
 
 private func shareAnchor(_ labels: [ScreenLabel], image: Data) -> CGFloat? {

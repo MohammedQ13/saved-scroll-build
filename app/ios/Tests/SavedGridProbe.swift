@@ -74,6 +74,15 @@ enum SavedGridProbe {
         checkAnchor("Video Share", kind: 1, expected: 0.741, lines: [
             ("123.4K", 0.924, 0.543), ("12.3K", 0.924, 0.619), ("34.5K", 0.924, 0.695),
         ])
+        checkAnchor("Share on the lower rail with the bottom count visible", kind: 1, expected: 0.814, lines: [
+            ("19.4K", 0.924, 0.616), ("44", 0.924, 0.693), ("2,102", 0.924, 0.770), ("1,362", 0.924, 0.845),
+        ])
+        checkAnchor("Two counts on a lower rail are insufficient", kind: 1, expected: 0, lines: [
+            ("19.4K", 0.924, 0.616), ("44", 0.924, 0.693),
+        ])
+        checkAnchor("Three counts fitting two rails cannot locate Share", kind: 1, expected: 0, lines: [
+            ("19.4K", 0.924, 0.616), ("44", 0.924, 0.693), ("2,102", 0.924, 0.770),
+        ])
         checkAnchor("Share counts with merged icon fragments", kind: 1, expected: 0.782, lines: [
             ("YM17.2K", 0.924, 0.584), ("26", 0.924, 0.660), ("•1226", 0.924, 0.812),
         ])
@@ -109,7 +118,7 @@ enum SavedGridProbe {
             ("Send to", 0.5, 0.593), ("Repost  Copy link  WhatsApp", 0.29, 0.827),
         ])
         checkAnchor("Copy without share sheet", kind: 2, expected: 0, lines: [("Copy link", 0.27, 0.827)])
-        print("Vision passed \(fixtures.count + 21) synthetic screen checks.")
+        print("Vision passed \(fixtures.count + 24) synthetic screen checks.")
     }
 
     static func checkAnchor(_ name: String, kind: Int32, expected: CGFloat, lines: [(String, CGFloat, CGFloat)], bookmark: Bool = false) {

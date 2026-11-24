@@ -311,7 +311,7 @@ impl<D: Device + 'static> Engine<D> {
     /// Steps separated by ';' with normalised coordinates. R tries the status-bar return link, then PiP.
     pub async fn run_macro(&self, steps: &str) {
         #[cfg(target_os = "ios")]
-        let mut tile_tap = None;
+        let mut prior_tap = None;
         for st in steps.split(';').map(str::trim).filter(|s| !s.is_empty()) {
             if *self.stop.borrow() { break; }
             let mut it = st.split_whitespace();
@@ -349,13 +349,13 @@ impl<D: Device + 'static> Engine<D> {
                     if *self.stop.borrow() || APP_IN_FRONT.load(std::sync::atomic::Ordering::Relaxed) { break; }
                     let Some(y) = anchor.and_then(|y| y.checked_add(u(2))).filter(|&y| y < 59000) else {
                         #[cfg(target_os = "ios")]
-                        if kind == 1 {
-                            if let Some((x, y, tap_ms, finished)) = tile_tap {
+                        if let Some((previous, x, y, tap_ms, finished)) = prior_tap {
+                            if (kind == 1 || kind == 2) && previous == kind - 1 {
                                 extern "C" {
-                                    fn ss_share_failure_after_tap(x: u16, y: u16, tap_ms: u64, wait_ms: u64, guard_ms: u64);
+                                    fn ss_guard_failure_after_tap(kind: i32, x: u16, y: u16, tap_ms: u64, wait_ms: u64, guard_ms: u64);
                                 }
                                 unsafe {
-                                    ss_share_failure_after_tap(x, y, tap_ms, guard_started.duration_since(finished).as_millis() as u64,
+                                    ss_guard_failure_after_tap(kind, x, y, tap_ms, guard_started.duration_since(finished).as_millis() as u64,
                                                                guard_started.elapsed().as_millis() as u64);
                                 }
                             }
@@ -375,8 +375,8 @@ impl<D: Device + 'static> Engine<D> {
                         break;
                     }
                     #[cfg(target_os = "ios")]
-                    if kind == 0 {
-                        tile_tap = Some((u(1), y, tap_started.elapsed().as_millis() as u64, Instant::now()));
+                    if kind == 0 || kind == 1 {
+                        prior_tap = Some((kind, u(1), y, tap_started.elapsed().as_millis() as u64, Instant::now()));
                     }
                 }
                 "R" => {

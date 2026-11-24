@@ -5,6 +5,7 @@ import Vision
 
 private let gridRegion = CGRect(x: 0, y: 0.46, width: 1, height: 0.44)
 private let gridPhrases = ["search saved posts", "posts ", "collections", "sounds", "effects"]
+private let shareRegion = CGRect(x: 0.86, y: 0.12, width: 0.14, height: 0.44)
 
 /// Coordinates are in the engine's top-left 0...65535 space. Zero means there
 /// is no verified anchor. The frame and its text stay on the phone.
@@ -15,7 +16,7 @@ func ssScreenAnchor(_ bytes: UnsafePointer<UInt8>, _ count: Int, _ kind: Int32) 
     let screenKind: Int32 = kind == 3 ? 0 : kind
     let regions = [
         gridRegion,                                         // Saved tabs or pinned search
-        CGRect(x: 0.86, y: 0.16, width: 0.14, height: 0.40), // Post's vertical action rail
+        shareRegion,                                        // Post's vertical action rail
         CGRect(x: 0, y: 0.11, width: 1, height: 0.36),      // Share sheet
     ]
     guard regions.indices.contains(Int(screenKind)) else { return 0 }
@@ -52,6 +53,12 @@ func ssScreenAnchor(_ bytes: UnsafePointer<UInt8>, _ count: Int, _ kind: Int32) 
             return gridAnchor(labels) != nil
         }
         ssLog.notice("screen anchor 1: no matching layout; same frame Saved=\(saved) rail labels=\(railLabels)")
+    } else if screenKind == 2 {
+        let post = [VNRequestTextRecognitionLevel.fast, .accurate].contains { level in
+            guard let labels = try? recognize(data, region: shareRegion, phrases: [], level: level) else { return false }
+            return shareAnchor(labels, image: data) != nil
+        }
+        ssLog.notice("screen anchor 2: no matching layout; same frame post rail=\(post)")
     } else {
         ssLog.notice("screen anchor \(kind): no matching layout")
     }
@@ -128,9 +135,9 @@ func ssScreenCaptureFailed(_ kind: Int32, _ timedOut: Int32) {
 }
 
 #if os(iOS)
-@_cdecl("ss_share_failure_after_tap")
-func ssShareFailureAfterTap(_ x: UInt16, _ y: UInt16, _ tapMs: UInt64, _ waitMs: UInt64, _ guardMs: UInt64) {
-    ssLog.notice("Share failure after tile tap completed: x=\(x) y=\(y) tap=\(tapMs)ms wait=\(waitMs)ms guard=\(guardMs)ms")
+@_cdecl("ss_guard_failure_after_tap")
+func ssGuardFailureAfterTap(_ kind: Int32, _ x: UInt16, _ y: UInt16, _ tapMs: UInt64, _ waitMs: UInt64, _ guardMs: UInt64) {
+    ssLog.notice("screen anchor \(kind) failed after prior tap completed: x=\(x) y=\(y) tap=\(tapMs)ms wait=\(waitMs)ms guard=\(guardMs)ms")
 }
 #endif
 
@@ -192,21 +199,26 @@ private func shareAnchor(_ labels: [ScreenLabel], image: Data) -> CGFloat? {
             return start + 0.198
         }
     }
-    var best: (score: CGFloat, start: CGFloat)?
+    var candidates: [(score: CGFloat, start: CGFloat, count: Int)] = []
     for center in counts {
         for offset in rail {
             let start = center - offset
-            guard (0.50...0.61).contains(start) else { continue }
+            // Permit a lower rail only when at least three distinct counts
+            // agree on its spacing. The single-count fallbacks stay narrower.
+            guard (0.50...0.63).contains(start) else { continue }
             let errors = rail.compactMap { slot in counts.map { abs($0 - (start + slot)) }.min() }
                 .filter { $0 < 0.010 }
             guard errors.count >= 3 else { continue }
             let score = CGFloat(errors.count) - errors.reduce(0, +)
-            if score > (best?.score ?? 0) {
-                best = (score, start)
-            }
+            candidates.append((score, start, errors.count))
         }
     }
-    if let best { return best.start + 0.198 }
+    if let best = candidates.max(by: { $0.score < $1.score }) {
+        // Three counts can fit two rails a button apart when an end count
+        // is missing. Do not tap a neighboring action in that case.
+        let ambiguous = candidates.contains { $0.count == best.count && abs($0.start - best.start) > 0.04 }
+        return ambiguous ? nil : best.start + 0.198
+    }
     // A bright background can merge a trailing dash into the likes count and
     // hide the other counts. Only accept that lone reading when the saved
     // bookmark independently appears at the expected third rail position.

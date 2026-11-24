@@ -161,16 +161,22 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
   }
   if (!lib) return out({ ok: false, text: "Import your TikTok export first (tap the button › Import my TikTok export)." });
 
-  const where = async link => {
+  const where = async (link, evidence) => {
     let id = core.linkToId(link);
     let resolveMs;
     if (!id && core.isShortLink(link)) {
       const start = Date.now();
       id = core.linkToId(await resolveLink(link));
-      if (id) resolveMs = Date.now() - start;
+      const elapsed = Date.now() - start;
+      if (id) resolveMs = elapsed;
+      if (evidence) evidence.redirectMs = elapsed;
     }
-    if (!id) return null;
-    return { ...lib.whereAmI(id, now), resolveMs };
+    const location = id ? lib.whereAmI(id, now) : null;
+    if (evidence) {
+      evidence.linkStatus = location ? (location.inIndex ? "indexed" : "outside-export") :
+        evidence.redirectMs != null ? "unresolved-short-link" : link ? "unreadable" : "missing";
+    }
+    return location ? { ...location, resolveMs } : null;
   };
   const describe = w => {
     if (!w.inIndex) return `Not in your last export (${w.note}).`;
@@ -246,7 +252,8 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     if (!st || st.runId !== flight.id || st.done !== flight.n || st.error || st.checkFailed) {
       return failV2(jump, "The scroll was interrupted. Return to Saved and start again.", undefined, "interrupted");
     }
-    const w = await where(cmd.link);
+    const evidence = {};
+    const w = await where(cmd.link, evidence);
     if (flight.n) {
       jump.motionMs = st.motionMs;
       jump.completedMotion = st.done;
@@ -257,7 +264,7 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
       const observed = anchors.map(r => lib.saves[r - 1]).filter(Boolean);
       const match = rank != null && Math.abs(rank - jump.rank) <= 15 && targetMatches(jump, lib.saves[rank - 1])
         ? lib.saves[rank - 1] : null;
-      recordV2("verify-target", jump, { engineRun: flight.id, observed: rank, row: flight.row, verified: !!match });
+      recordV2("verify-target", jump, { engineRun: flight.id, observed: rank, row: flight.row, verified: !!match, ...evidence });
       jump.inFlight = null;
       if (match || !remaining.length) return finishLanding(jump, error, observed, match);
       jump.action = v2.check(remaining.shift());
@@ -268,7 +275,7 @@ Fix: open LocalDevVPN and make sure it says Connected, then open the Saved Scrol
     recordV2("check", jump, { engineRun: flight.id, observed: rank, from: jump.rank, row: flight.row,
       swipes: st.done, elapsedMs: now - flight.at, motionRun: flight.motionRun,
       motionMs: result.sample ? jump.motionMs : undefined, error: result.error, sample: result.sample,
-      verified: !!(result.located || result.done) });
+      verified: !!(result.located || result.done), ...evidence });
     jump.inFlight = null;
     if (result.failed) return failV2(jump, result.failed, result.error, "localization");
     if (result.done) {

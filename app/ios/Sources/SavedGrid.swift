@@ -3,6 +3,9 @@ import CoreGraphics
 import ImageIO
 import Vision
 
+private let gridRegion = CGRect(x: 0, y: 0.53, width: 1, height: 0.37)
+private let gridPhrases = ["search saved posts", "posts ", "collections", "sounds", "effects"]
+
 /// Coordinates are in the engine's top-left 0...65535 space. Zero means there
 /// is no verified anchor. The frame and its text stay on the phone.
 @_cdecl("ss_screen_anchor")
@@ -11,36 +14,28 @@ func ssScreenAnchor(_ bytes: UnsafePointer<UInt8>, _ count: Int, _ kind: Int32) 
     // pre-tap frame. It never changes the anchor or decides arrival.
     let screenKind: Int32 = kind == 3 ? 0 : kind
     let regions = [
-        CGRect(x: 0, y: 0.53, width: 1, height: 0.37),      // Saved tabs or pinned search
+        gridRegion,                                         // Saved tabs or pinned search
         CGRect(x: 0.86, y: 0.16, width: 0.14, height: 0.40), // Post's vertical action rail
         CGRect(x: 0, y: 0.11, width: 1, height: 0.36),      // Share sheet
     ]
     guard regions.indices.contains(Int(screenKind)) else { return 0 }
     let region = regions[Int(screenKind)]
     let data = Data(bytes: bytes, count: count)
+    let phrases = screenKind == 0 ? gridPhrases : screenKind == 2 ? ["send to", "copy link"] : []
+    #if os(iOS)
+    var railLabels = 0
+    #endif
     for level in [VNRequestTextRecognitionLevel.fast, .accurate] {
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = level
-        request.regionOfInterest = region
-        request.minimumTextHeight = 0.006
-        let handler = VNImageRequestHandler(data: data, options: [:])
-        do { try handler.perform([request]) } catch { return 0 }
-        func label(_ text: String, _ box: CGRect) -> ScreenLabel {
-            ScreenLabel(text: text.lowercased().trimmingCharacters(in: .whitespaces),
-                        x: region.minX + box.midX * region.width, y: 1 - region.minY - box.midY * region.height)
-        }
-        let phrases = screenKind == 0 ? ["search saved posts", "posts ", "collections", "sounds", "effects"] :
-                      screenKind == 2 ? ["send to", "copy link"] : []
-        let labels = (request.results ?? []).flatMap { result -> [ScreenLabel] in
-            guard let candidate = result.topCandidates(1).first else { return [] }
-            let pieces = phrases.compactMap { phrase -> ScreenLabel? in
-                guard let range = candidate.string.range(of: phrase, options: .caseInsensitive),
-                      let box = try? candidate.boundingBox(for: range) else { return nil }
-                return label(phrase, box.boundingBox)
-            }
-            return [label(candidate.string, result.boundingBox)] + pieces
+        guard let labels = try? recognize(data, region: region, phrases: phrases, level: level) else {
+            #if os(iOS)
+            ssLog.notice("screen anchor \(kind): Vision failed")
+            #endif
+            return 0
         }
         let anchor = screenKind == 0 ? gridAnchor(labels) : screenKind == 1 ? shareAnchor(labels, image: data) : copyAnchor(labels)
+        #if os(iOS)
+        if screenKind == 1 { railLabels = max(railLabels, labels.filter { (0.89...0.96).contains($0.x) }.count) }
+        #endif
         if let anchor, (0..<1).contains(anchor) {
             #if os(iOS)
             if kind == 3 { recordViewportShadow(data, anchor: anchor) }
@@ -49,9 +44,42 @@ func ssScreenAnchor(_ bytes: UnsafePointer<UInt8>, _ count: Int, _ kind: Int32) 
         }
     }
     #if os(iOS)
-    ssLog.notice("screen anchor \(kind): no matching layout")
+    if screenKind == 1 {
+        // Inspect the same failed Share frame. A later capture cannot tell us
+        // what the recognizer received, and this check must never enable a tap.
+        let saved = [VNRequestTextRecognitionLevel.fast, .accurate].contains { level in
+            guard let labels = try? recognize(data, region: gridRegion, phrases: gridPhrases, level: level) else { return false }
+            return gridAnchor(labels) != nil
+        }
+        ssLog.notice("screen anchor 1: no matching layout; same frame Saved=\(saved) rail labels=\(railLabels)")
+    } else {
+        ssLog.notice("screen anchor \(kind): no matching layout")
+    }
     #endif
     return 0
+}
+
+private func recognize(_ data: Data, region: CGRect, phrases: [String],
+                       level: VNRequestTextRecognitionLevel) throws -> [ScreenLabel] {
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = level
+    request.regionOfInterest = region
+    request.minimumTextHeight = 0.006
+    try VNImageRequestHandler(data: data, options: [:]).perform([request])
+
+    func label(_ text: String, _ box: CGRect) -> ScreenLabel {
+        ScreenLabel(text: text.lowercased().trimmingCharacters(in: .whitespaces),
+                    x: region.minX + box.midX * region.width, y: 1 - region.minY - box.midY * region.height)
+    }
+    return (request.results ?? []).flatMap { result -> [ScreenLabel] in
+        guard let candidate = result.topCandidates(1).first else { return [] }
+        let pieces = phrases.compactMap { phrase -> ScreenLabel? in
+            guard let range = candidate.string.range(of: phrase, options: .caseInsensitive),
+                  let box = try? candidate.boundingBox(for: range) else { return nil }
+            return label(phrase, box.boundingBox)
+        }
+        return [label(candidate.string, result.boundingBox)] + pieces
+    }
 }
 
 #if os(iOS)
@@ -99,12 +127,12 @@ func ssScreenCaptureFailed(_ kind: Int32, _ timedOut: Int32) {
     #endif
 }
 
-@_cdecl("ss_macro_retry_event")
-func ssMacroRetryEvent(_ stage: Int32) {
-    #if os(iOS)
-    ssLog.notice("tile retry stage \(stage)")
-    #endif
+#if os(iOS)
+@_cdecl("ss_share_failure_after_tap")
+func ssShareFailureAfterTap(_ x: UInt16, _ y: UInt16, _ tapMs: UInt64, _ waitMs: UInt64, _ guardMs: UInt64) {
+    ssLog.notice("Share failure after tile tap completed: x=\(x) y=\(y) tap=\(tapMs)ms wait=\(waitMs)ms guard=\(guardMs)ms")
 }
+#endif
 
 @_cdecl("ss_is_saved_grid")
 func ssIsSavedGrid(_ bytes: UnsafePointer<UInt8>, _ count: Int) -> Int32 {
